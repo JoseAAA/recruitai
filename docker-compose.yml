@@ -1,0 +1,130 @@
+services:
+  # Vector Database for semantic search
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: recruitai-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    networks:
+      - recruitai-network
+    restart: unless-stopped
+
+  # PostgreSQL for relational data
+  postgres:
+    image: postgres:15-alpine
+    container_name: recruitai-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-recruitai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-recruitai_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-recruitai_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - recruitai-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recruitai}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ollama for local LLM inference
+  ollama:
+    image: ollama/ollama:latest
+    container_name: recruitai-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - recruitai-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    # Falls back to CPU if no GPU available
+
+    # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: recruitai-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-recruitai}:${POSTGRES_PASSWORD:-recruitai_secret}@postgres:5432/${POSTGRES_DB:-recruitai_db}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=http://ollama:11434
+      - JWT_SECRET=${JWT_SECRET:-super-secret-key-change-in-production}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      # LLM Configuration
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+    depends_on:
+      - qdrant
+      - postgres
+    restart: unless-stopped
+    networks:
+      - recruitai-network
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: recruitai-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    networks:
+      - recruitai-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: recruitai-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - recruitai-network
+
+volumes:
+  qdrant_data:
+  postgres_data:
+  ollama_data:
+
+
+networks:
+  recruitai-network:
+    driver: bridge

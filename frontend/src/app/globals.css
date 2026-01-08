@@ -1,0 +1,208 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Import Inter font */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@layer base {
+  :root {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 222.2 47.4% 11.2%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222.2 47.4% 11.2%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 217 91% 50%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 50.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 215 28% 26%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 217 91% 50%;
+
+    --radius: 0.5rem;
+
+    /* Custom colors from design */
+    --background-dark: 222 47% 11%;
+    --card-dark: 217 33% 17%;
+    --border-dark: 215 25% 27%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-[#0f172a] text-white;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* Material Symbols - Critical styles for icon display */
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined', sans-serif;
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  -moz-font-feature-settings: 'liga';
+  font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+.material-symbols-outlined.fill {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f172a;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Score colors */
+.score-excellent {
+  @apply text-emerald-400;
+}
+
+.score-good {
+  @apply text-green-400;
+}
+
+.score-fair {
+  @apply text-amber-400;
+}
+
+.score-poor {
+  @apply text-rose-400;
+}
+
+/* Background colors */
+.bg-background-dark {
+  background-color: #0f172a;
+}
+
+.bg-card-dark {
+  background-color: #1e293b;
+}
+
+.border-dark {
+  border-color: #334155;
+}
+
+/* Animation utilities */
+@keyframes pulse-glow {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Primary color */
+.text-primary {
+  color: #135bec;
+}
+
+.bg-primary {
+  background-color: #135bec;
+}
+
+.bg-primary\/10 {
+  background-color: rgba(19, 91, 236, 0.1);
+}
+
+.border-primary {
+  border-color: #135bec;
+}
+
+/* Hover states */
+.hover\:bg-primary\/90:hover {
+  background-color: rgba(19, 91, 236, 0.9);
+}
+
+/* Text sizing for icons */
+.text-\[14px\] {
+  font-size: 14px;
+}
+
+.text-\[16px\] {
+  font-size: 16px;
+}
+
+.text-\[18px\] {
+  font-size: 18px;
+}
+
+.text-\[20px\] {
+  font-size: 20px;
+}
+
+.text-\[24px\] {
+  font-size: 24px;
+}
+
+.text-\[28px\] {
+  font-size: 28px;
+}
+
+.text-\[32px\] {
+  font-size: 32px;
+}
+
+.text-\[48px\] {
+  font-size: 48px;
+}
+
+.text-\[120px\] {
+  font-size: 120px;
+}
