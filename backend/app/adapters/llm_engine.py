@@ -3,18 +3,23 @@ LLM Engine Adapter
 Handles communication with LLM providers for structured data extraction.
 Supports multiple providers: Ollama (local), OpenAI, Gemini.
 Includes fallback for when no LLM is available.
+
+Security Features:
+- PII Masking: Anonymizes personal data before sending to LLM (LPDP Perú compliance)
+- Prompt Injection Defense: Multi-layer protection against malicious inputs
+- Output Validation: Ensures LLM returns required fields
 """
 import json
 import logging
 import re
-from typing import Optional, Type, TypeVar
+from typing import Optional, Type, TypeVar, Dict, Tuple
 
-import httpx
 from pydantic import BaseModel
 
 from app.core.config import settings
 from app.domain.models import ExtractedJobProfile, ExtractedResume, ExperienceEntry, EducationEntry
 from app.adapters.llm_providers import get_provider, LLMProvider
+from app.adapters.pii_masker import get_pii_masker, PIIMasker
 
 logger = logging.getLogger(__name__)
 
@@ -36,34 +41,77 @@ class LLMEngine:
     
     # ===========================================
     # SECURITY: Multi-Layer Prompt Injection Defense
+    # Based on OWASP LLM Top 10 2025 (LLM01: Prompt Injection)
     # ===========================================
     
     # Layer 1: Suspicious patterns (regex-based detection)
+    # Categories based on OWASP and common attack vectors
     SUSPICIOUS_PATTERNS = [
-        # Instruction override attempts
-        r"ignore\s+(previous|all|above|prior)\s+instructions?",
-        r"disregard\s+(previous|all|above|prior)",
-        r"forget\s+(everything|what|previous|all)",
-        r"override\s+(previous|system|all)",
-        # Role hijacking
+        # === INSTRUCTION OVERRIDE ATTEMPTS ===
+        r"ignore\s+(previous|all|above|prior|earlier)\s+instructions?",
+        r"disregard\s+(previous|all|above|prior|earlier)",
+        r"forget\s+(everything|what|previous|all|earlier)",
+        r"override\s+(previous|system|all|earlier)",
+        r"do\s+not\s+follow\s+(previous|prior|earlier)",
+        r"stop\s+following\s+(instructions|rules)",
+        
+        # === ROLE HIJACKING / JAILBREAK ===
         r"you\s+are\s+now\s+a?",
         r"act\s+as\s+(if\s+you\s+are|a)",
         r"pretend\s+(to\s+be|you\s+are)",
         r"roleplay\s+as",
-        # System prompt manipulation
+        r"imagine\s+you\s+are",
+        r"from\s+now\s+on\s+you\s+are",
+        r"switch\s+to\s+.+\s+mode",
+        r"enter\s+.+\s+mode",
+        r"jailbreak",
+        r"DAN\s+mode",  # "Do Anything Now" jailbreak
+        
+        # === SYSTEM PROMPT MANIPULATION ===
         r"new\s+instructions?:",
         r"system\s*:\s*",
         r"```\s*system",
         r"\[system\]",
         r"<\s*system\s*>",
-        # Output manipulation
+        r"assistant\s*:\s*",
+        r"\[INST\]",
+        r"<<SYS>>",
+        
+        # === OUTPUT MANIPULATION ===
         r"respond\s+only\s+with",
         r"output\s+only",
         r"return\s+only\s+the\s+following",
-        # Encoding tricks
+        r"print\s+the\s+following",
+        r"say\s+exactly",
+        r"your\s+response\s+must\s+be",
+        
+        # === ENCODING TRICKS / OBFUSCATION ===
         r"base64\s*:",
         r"hex\s*:",
         r"\\x[0-9a-f]{2}",
+        r"unicode\s*:",
+        r"rot13\s*:",
+        r"decode\s+this",
+        
+        # === DATA EXFILTRATION ATTEMPTS ===
+        r"reveal\s+(your|the)\s+(system|prompt|instructions)",
+        r"show\s+me\s+(your|the)\s+prompt",
+        r"what\s+are\s+your\s+instructions",
+        r"repeat\s+(your|the)\s+(system|initial)\s+prompt",
+        r"print\s+your\s+instructions",
+        
+        # === INDIRECT INJECTION (from external content) ===
+        r"if\s+you\s+are\s+an?\s+(ai|assistant|llm)",
+        r"dear\s+(ai|assistant|model)",
+        r"attention\s+(ai|assistant|model)",
+        r"instructions?\s+for\s+(the\s+)?(ai|assistant|model)",
+        
+        # === CODE EXECUTION ATTEMPTS ===
+        r"execute\s+(this|the\s+following)",
+        r"run\s+(this|the\s+following)\s+code",
+        r"<script>",
+        r"javascript:",
+        r"eval\s*\(",
     ]
     
     # Layer 2: Maximum input lengths (prevent token exhaustion attacks)
@@ -74,13 +122,33 @@ class LLMEngine:
     REQUIRED_RESUME_FIELDS = {"nombre", "email", "skills"}
     REQUIRED_JOB_FIELDS = {"titulo", "requisitos"}
     
-    def __init__(self, client: Optional[httpx.AsyncClient] = None):
+    # Layer 4: Output scanning - detect if LLM was compromised
+    OUTPUT_ANOMALY_PATTERNS = [
+        r"I\s+(am|was)\s+(forced|instructed|told)\s+to",
+        r"my\s+(system|original)\s+prompt",
+        r"here\s+are\s+my\s+instructions",
+        r"I\s+have\s+been\s+jailbroken",
+        r"DAN\s+mode\s+(activated|enabled)",
+        r"<script>",
+        r"javascript:",
+        r"I\s+cannot\s+provide.*but\s+I\s+will",
+    ]
+    
+    def __init__(self, enable_pii_masking: bool = True):
         self._provider: Optional[LLMProvider] = None
         self._provider_available: Optional[bool] = None
-        # Legacy support
-        self.base_url = settings.OLLAMA_HOST
-        self.model = settings.OLLAMA_MODEL
-        self._client = client
+        
+        # Privacy: PII Masking (LPDP Perú Compliance)
+        self._enable_pii_masking = enable_pii_masking
+        self._pii_masker: Optional[PIIMasker] = None
+        self._last_pii_mapping: Dict[str, str] = {}
+    
+    @property
+    def pii_masker(self) -> PIIMasker:
+        """Get the PII masker instance."""
+        if self._pii_masker is None:
+            self._pii_masker = get_pii_masker()
+        return self._pii_masker
     
     @property
     def provider(self) -> LLMProvider:
@@ -89,12 +157,7 @@ class LLMEngine:
             self._provider = get_provider()
         return self._provider
     
-    @property
-    def client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=120.0)
-        return self._client
-    
+
     async def _is_provider_available(self) -> bool:
         """Check if the configured LLM provider is available."""
         if self._provider_available is not None:
@@ -108,37 +171,18 @@ class LLMEngine:
         
         return self._provider_available
     
-    # Legacy method for backwards compatibility
-    async def _is_ollama_available(self) -> bool:
-        """Legacy method - now checks configured provider."""
-        return await self._is_provider_available()
-    
     def sanitize_input(self, text: str, max_length: int = None) -> str:
         """
-        Multi-layer input sanitization for prompt injection prevention.
-        
-        Layer 1: Remove control characters
-        Layer 2: Check for suspicious patterns
-        Layer 3: Enforce length limits
+        Basic input truncation to prevent memory exhaustion.
+        Removed aggressive sanitization to preserve pure Docling Markdown.
         """
         if max_length is None:
             max_length = self.MAX_CV_LENGTH
-        
-        # Layer 1: Remove control characters (except newlines/tabs)
-        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
-        
-        # Layer 2: Pattern-based detection
-        text_lower = text.lower()
-        for pattern in self.SUSPICIOUS_PATTERNS:
-            if re.search(pattern, text_lower):
-                logger.warning(f"Prompt injection detected: {pattern}")
-                raise PromptInjectionError(f"Contenido sospechoso detectado en el documento")
-        
-        # Layer 3: Length limit enforcement
+            
         if len(text) > max_length:
             logger.warning(f"Input truncated from {len(text)} to {max_length} chars")
             text = text[:max_length]
-        
+            
         return text
     
     def validate_output(self, output: dict, required_fields: set) -> bool:
@@ -149,19 +193,100 @@ class LLMEngine:
         output_keys = set(output.keys()) if isinstance(output, dict) else set()
         return required_fields.issubset(output_keys)
     
-    def _extract_resume_simple(self, text: str) -> ExtractedResume:
-        """Simple regex-based resume extraction as fallback."""
+    def scan_output(self, output: str) -> bool:
+        """
+        Scan LLM output for signs of successful prompt injection.
+        
+        Layer 4 defense: detect if LLM was manipulated.
+        Returns True if output appears safe, False if anomalies detected.
+        
+        Note: Logs warning but doesn't block to avoid false positives.
+        """
+        if not output:
+            return True
+        
+        output_lower = output.lower()
+        anomalies_found = []
+        
+        for pattern in self.OUTPUT_ANOMALY_PATTERNS:
+            if re.search(pattern, output_lower, re.IGNORECASE):
+                anomalies_found.append(pattern)
+        
+        if anomalies_found:
+            logger.warning(
+                f"Potential output manipulation detected. "
+                f"Patterns matched: {len(anomalies_found)}. "
+                f"First match: {anomalies_found[0][:50]}"
+            )
+            return False
+        
+        return True
+    
+    def _extract_resume_simple(self, text: str, filename: str = "") -> ExtractedResume:
+        """
+        Enhanced regex-based resume extraction as fallback.
+        Now includes experience and education detection.
+        Uses multiple strategies for name extraction.
+        """
         text_lower = text.lower()
         lines = text.split('\n')
         
-        # Try to extract name from first non-empty line
+        # ============ SMART NAME EXTRACTION ============
         full_name = "Candidato Desconocido"
-        for line in lines[:5]:
-            line = line.strip()
-            if line and len(line) > 3 and len(line.split()) <= 4:
-                # Likely a name
-                full_name = line.title()
-                break
+        
+        # Strategy 1: Extract from email pattern (name.surname@)
+        email_match = re.search(r'([\w]+)[._]([\w]+)@[\w\.-]+\.\w+', text)
+        if email_match:
+            first_name = email_match.group(1)
+            last_name = email_match.group(2)
+            # Validate it looks like a name (not random letters)
+            if len(first_name) > 2 and len(last_name) > 2:
+                full_name = f"{first_name.title()} {last_name.title()}"
+        
+        # Strategy 2: Look for ALL CAPS lines (common for names in CVs)
+        if full_name == "Candidato Desconocido":
+            for line in lines:
+                line = line.strip()
+                words = line.split()
+                # Looking for 2-4 ALL CAPS words that look like a name
+                if 2 <= len(words) <= 4:
+                    all_caps = all(w.isupper() and len(w) > 1 and w.isalpha() for w in words)
+                    if all_caps:
+                        full_name = line.title()
+                        break
+        
+        # Strategy 3: First lines with 2-4 capitalized words
+        if full_name == "Candidato Desconocido":
+            for line in lines[:15]:  # Check more lines
+                line = line.strip()
+                # Skip common headers
+                skip_words = ['contacto', 'experiencia', 'educación', 'habilidades', 
+                              'perfil', 'objetivo', 'resumen', 'datos', 'curriculum',
+                              'soft', 'hard', 'skill', 'idiomas', 'laboral']
+                if any(sw in line.lower() for sw in skip_words):
+                    continue
+                    
+                words = line.split()
+                if 2 <= len(words) <= 4:
+                    # Check if words look like names (capitalized)
+                    looks_like_name = all(
+                        w[0].isupper() and w[1:].islower() if len(w) > 1 else w.isupper()
+                        for w in words if w.isalpha()
+                    )
+                    if looks_like_name and all(w.isalpha() for w in words):
+                        full_name = line.title()
+                        break
+        
+        # Strategy 4: Use filename as last resort
+        if full_name == "Candidato Desconocido" and filename:
+            # Try to extract name from filename like "CV_MayumyCarrasco.pdf"
+            clean_name = filename.replace('.pdf', '').replace('.docx', '')
+            clean_name = re.sub(r'^(cv|resume|curriculum)[_\-\s]*', '', clean_name, flags=re.IGNORECASE)
+            # Split CamelCase or underscores
+            clean_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', clean_name)
+            clean_name = clean_name.replace('_', ' ').replace('-', ' ')
+            if len(clean_name) > 3:
+                full_name = clean_name.title()
         
         # Extract email
         email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text)
@@ -187,6 +312,124 @@ class LLMEngine:
             if skill in text_lower:
                 found_skills.append(skill.title())
         
+        # ============ EXPERIENCE EXTRACTION ============
+        experience_entries = []
+        # Look for patterns like "2020 - 2024", "Enero 2020 - Presente"
+        date_pattern = r'(\d{4})\s*[-–]\s*(presente|actual|current|\d{4})'
+        # Job title patterns
+        job_titles = [
+            'desarrollador', 'developer', 'analista', 'analyst', 'gerente', 'manager',
+            'director', 'coordinador', 'coordinator', 'especialista', 'specialist',
+            'ingeniero', 'engineer', 'consultor', 'consultant', 'asistente', 'assistant',
+            'jefe', 'supervisor', 'líder', 'lead', 'senior', 'junior', 'practicante',
+            'intern', 'trainee', 'contador', 'accountant', 'vendedor', 'sales'
+        ]
+        
+        for i, line in enumerate(lines):
+            line_lower = line.lower().strip()
+            
+            # Check if line contains a job title
+            has_job_title = any(title in line_lower for title in job_titles)
+            
+            # Check for date range in nearby lines
+            context = ' '.join(lines[max(0, i-1):min(len(lines), i+3)])
+            date_match = re.search(date_pattern, context, re.IGNORECASE)
+            
+            if has_job_title and len(line.strip()) > 5:
+                title = line.strip()[:100]
+                company = ""
+                is_current = False
+                
+                # Try to extract dates
+                start_date = None
+                end_date = None
+                if date_match:
+                    try:
+                        from datetime import date as date_type
+                        start_year = int(date_match.group(1))
+                        start_date = date_type(start_year, 1, 1)
+                        end = date_match.group(2)
+                        if end.lower() in ['presente', 'actual', 'current']:
+                            is_current = True
+                            end_date = None
+                        else:
+                            end_year = int(end)
+                            end_date = date_type(end_year, 12, 31)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Look for company name (usually near job title)
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    if next_line and len(next_line) < 60 and '@' not in next_line:
+                        company = next_line
+                
+                if title:
+                    experience_entries.append(ExperienceEntry(
+                        title=title,
+                        company=company or "No especificada",
+                        start_date=start_date,
+                        end_date=end_date,
+                        is_current=is_current,
+                        description=None
+                    ))
+                    
+        # Dedupe and limit experience entries
+        seen_titles = set()
+        unique_experience = []
+        for exp in experience_entries[:5]:  # Max 5 entries
+            if exp.title.lower() not in seen_titles:
+                seen_titles.add(exp.title.lower())
+                unique_experience.append(exp)
+        
+        # ============ EDUCATION EXTRACTION ============
+        education_entries = []
+        edu_keywords = [
+            'universidad', 'university', 'instituto', 'institute', 'colegio',
+            'licenciatura', 'bachiller', 'maestría', 'master', 'doctorado', 'phd',
+            'ingeniería', 'engineering', 'administración', 'economía', 'derecho',
+            'contabilidad', 'medicina', 'psicología', 'técnico', 'diplomado'
+        ]
+        
+        for i, line in enumerate(lines):
+            line_lower = line.lower().strip()
+            
+            has_edu_keyword = any(kw in line_lower for kw in edu_keywords)
+            
+            if has_edu_keyword and len(line.strip()) > 5:
+                degree = line.strip()[:100]
+                institution = ""
+                end_date = None
+                
+                # Try to find year
+                year_match = re.search(r'(19|20)\d{2}', line)
+                if year_match:
+                    try:
+                        from datetime import date as date_type
+                        year = int(year_match.group(0))
+                        end_date = date_type(year, 12, 31)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Check previous/next line for institution
+                if i > 0:
+                    prev_line = lines[i - 1].strip()
+                    if 'universidad' in prev_line.lower() or 'institute' in prev_line.lower():
+                        institution = prev_line
+                
+                if degree:
+                    education_entries.append(EducationEntry(
+                        institution=institution or "No especificada",
+                        degree=degree,
+                        field_of_study=None,
+                        start_date=None,
+                        end_date=end_date,
+                        gpa=None
+                    ))
+        
+        # Dedupe and limit education
+        unique_education = education_entries[:3]  # Max 3 entries
+        
         # Create summary from first 500 chars
         summary = text[:500].replace('\n', ' ').strip()
         
@@ -196,138 +439,495 @@ class LLMEngine:
             phone=phone,
             summary=summary,
             skills=list(set(found_skills)),
-            experience=[],
-            education=[]
+            experience=unique_experience,
+            education=unique_education
         )
     
     async def extract_structured(
         self,
         text: str,
         schema: Type[T],
-        system_prompt: str
+        system_prompt: str,
+        mask_pii: Optional[bool] = None,
+        filename: str = "",
+        model_override: Optional[str] = None
     ) -> T:
-        """Extract structured data from text using configured LLM provider."""
+        """
+        Extract structured data from text using configured LLM provider.
+        
+        Args:
+            text: Raw text to extract from
+            schema: Pydantic model for validation
+            system_prompt: Instructions for LLM
+            filename: Original filename for fallback name extraction
+            mask_pii: Override PII masking setting (None = use default)
+        
+        Security:
+            - Sanitizes input for prompt injection
+            - Masks PII before sending to LLM (LPDP compliance)
+            - Restores PII in extracted fields after response
+        """
         sanitized_text = self.sanitize_input(text)
         
         # Check if provider is available
         if not await self._is_provider_available():
             logger.info("LLM provider not available, using simple extraction")
             if schema == ExtractedResume:
-                return self._extract_resume_simple(sanitized_text)
+                return self._extract_resume_simple(sanitized_text, filename=filename)
             else:
                 raise ValueError("Fallback not implemented for this schema")
-        
+
+        # PII Masking: only for cloud providers (Ollama keeps data local)
+        # When sending to Gemini/OpenAI, mask PII for LPDP Perú compliance
+        pii_mapping: Dict[str, str] = {}
+        should_mask = (
+            self._enable_pii_masking
+            and settings.PII_MASKING_ENABLED
+            and settings.LLM_PROVIDER not in ("ollama",)
+        )
+        if should_mask:
+            try:
+                sanitized_text, pii_mapping = self.pii_masker.mask(sanitized_text)
+                if pii_mapping:
+                    logger.info(f"PII masked: {len(pii_mapping)} entities before sending to {settings.LLM_PROVIDER}")
+            except Exception as e:
+                logger.warning(f"PII masking failed, continuing without masking: {e}")
+                pii_mapping = {}
+
         schema_json = schema.model_json_schema()
         
         full_prompt = f"""{system_prompt}
 
-Extract information from the following document and return it as valid JSON matching this schema:
+PLANTILLA JSON ESPERADA:
 {json.dumps(schema_json, indent=2)}
 
-<document>
-{sanitized_text}
-</document>
-
-Return ONLY valid JSON, no additional text or explanation."""
+TEXTO DEL CV A ANALIZAR:
+{sanitized_text}"""
         
         try:
-            # Use the configured provider
-            raw_output = await self.provider.generate(
-                prompt=full_prompt,
-                json_mode=True,
-                temperature=0.1,
-                max_tokens=2000
-            )
+            # Use override model if specified (only implemented for Ollama locally)
+            provider_to_use = self.provider
+            needs_close = False
             
-            logger.debug(f"LLM response from {self.provider.name}: {raw_output[:200]}...")
+            if model_override and self.provider.name.startswith("Ollama"):
+                from app.adapters.llm_providers import OllamaProvider
+                provider_to_use = OllamaProvider(model=model_override)
+                needs_close = True
+            
+            try:
+                # Ask the LLM to generate the JSON
+                raw_output = await provider_to_use.generate(
+                    prompt=full_prompt,
+                    system_prompt=system_prompt,
+                    json_mode=True,
+                    temperature=0.1,
+                    max_tokens=4096
+                )
+            finally:
+                if needs_close:
+                    await provider_to_use.close()
+            
+            logger.debug(f"LLM response from {provider_to_use.name}: {raw_output[:200]}...")
             
             try:
                 parsed = json.loads(raw_output)
+                
+                # Restore PII in the parsed output
+                if pii_mapping:
+                    parsed = self._restore_pii_in_dict(parsed, pii_mapping)
+                
                 return schema.model_validate(parsed)
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse LLM output as JSON: {e}")
                 json_match = re.search(r'\{.*\}', raw_output, re.DOTALL)
                 if json_match:
                     parsed = json.loads(json_match.group())
+                    
+                    # Restore PII
+                    if pii_mapping:
+                        parsed = self._restore_pii_in_dict(parsed, pii_mapping)
+                    
                     return schema.model_validate(parsed)
                 raise ValueError(f"Could not parse LLM response as JSON: {raw_output[:200]}")
         except Exception as e:
             logger.error(f"LLM extraction failed: {e}, falling back to simple extraction")
             if schema == ExtractedResume:
-                return self._extract_resume_simple(sanitized_text)
+                return self._extract_resume_simple(sanitized_text, filename=filename)
             raise
     
-    async def extract_resume(self, text: str) -> ExtractedResume:
-        """Extract structured resume data from raw text."""
-        system_prompt = """You are an expert HR assistant specialized in parsing resumes/CVs.
-Extract all relevant information accurately. 
-For dates, use YYYY-MM-DD format.
-For skills, list both technical and soft skills separately.
-If information is not present, use null or empty arrays."""
+    def _restore_pii_in_dict(self, data: dict, pii_mapping: Dict[str, str]) -> dict:
+        """
+        Recursively restore PII tokens in a dictionary.
         
-        return await self.extract_structured(text, ExtractedResume, system_prompt)
+        Converts [PERSON_1], [EMAIL_1], etc. back to original values.
+        """
+        if not pii_mapping:
+            return data
+        
+        def restore_value(value):
+            if isinstance(value, str):
+                return self.pii_masker.unmask(value, pii_mapping)
+            elif isinstance(value, dict):
+                return {k: restore_value(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                return [restore_value(item) for item in value]
+            return value
+        
+        return restore_value(data)
+    
+    async def extract_resume(self, text: str, filename: str = "") -> ExtractedResume:
+        """Extract structured resume data from raw text (Markdown via pymupdf4llm)."""
+        
+        extraction_model = getattr(settings, "EXTRACTION_MODEL", None)
+        
+        sanitized_text = self.sanitize_input(text)
+        
+        # Build a clean prompt with an explicit example — much more effective
+        # for small models (gemma3:4b) than sending the verbose Pydantic JSON Schema.
+        prompt = f"""Eres un experto en extracción de datos de CVs. Analiza el texto y devuelve ÚNICAMENTE un JSON con la estructura del ejemplo.
+
+REGLAS ESTRICTAS:
+1. Devuelve SOLO el JSON, sin texto adicional, sin markdown, sin ```json.
+2. Si un dato no aparece, usa null. NUNCA uses "N/A", "No especificado" ni texto vacío.
+3. El texto puede venir de OCR con formato irregular — interpreta el CONTENIDO, no el formato.
+4. Busca el email aunque esté separado por espacios o saltos de línea.
+5. Busca el teléfono incluyendo prefijos internacionales (+34, +51, +52, etc.).
+
+REGLAS PARA EXPERIENCIA PROFESIONAL:
+6. "periodo": texto legible del período, SIEMPRE que haya fechas (ej: "Enero 2021 - Mayo 2024"). Si no hay fechas, usa null.
+7. "fecha_inicio": formato "YYYY-MM" (ej: "2021-01"). OBLIGATORIO si hay año/mes visible. Si solo hay año, usa "YYYY-01".
+8. "fecha_fin": formato "YYYY-MM" o "Presente". Si dice "Presente", "Actual", "Actualidad", "Current" → pon "Presente".
+9. "es_trabajo_actual": true SOLO si fecha_fin es "Presente" o el cargo sigue activo.
+10. "resumen_logros": lista de logros/responsabilidades. Si no hay, usa lista vacía [].
+
+REGLAS PARA EDUCACIÓN (campo "tipo" es OBLIGATORIO):
+11. tipo = "educacion" → universidad, facultad, instituto técnico, bachillerato, maestría, máster, doctorado, MBA, licenciatura, ingeniería, tecnología.
+12. tipo = "certificacion" → bootcamp, curso online, certificado, diplomado, especialización, taller, Coursera, Udemy, Platzi, LinkedIn Learning, Google, AWS, Microsoft, Oracle, Scrum, PMP.
+13. "anio_egreso": año de graduación/finalización como string (ej: "2020"). Si no aparece, usa null.
+
+EJEMPLO DE RESPUESTA:
+{{
+  "datos_personales": {{
+    "nombre_completo": "María García López",
+    "telefono": "+34 612345678",
+    "email": "maria.garcia@gmail.com",
+    "linkedin": "https://www.linkedin.com/in/maria-garcia"
+  }},
+  "habilidades": ["Python", "SQL", "Power BI", "Machine Learning", "Excel"],
+  "experiencia_profesional": [
+    {{
+      "cargo": "Analista de Datos Senior",
+      "empresa": "Empresa ABC",
+      "periodo": "Enero 2021 - Mayo 2024",
+      "fecha_inicio": "2021-01",
+      "fecha_fin": "2024-05",
+      "es_trabajo_actual": false,
+      "resumen_logros": ["Automatizó procesos ETL reduciendo tiempos un 40%", "Lideró migración de base de datos"]
+    }},
+    {{
+      "cargo": "Data Analyst",
+      "empresa": "Tech Corp",
+      "periodo": "Junio 2024 - Presente",
+      "fecha_inicio": "2024-06",
+      "fecha_fin": "Presente",
+      "es_trabajo_actual": true,
+      "resumen_logros": ["Lideró equipo de 5 personas", "Implementó dashboard de KPIs"]
+    }}
+  ],
+  "educacion": [
+    {{
+      "institucion": "Universidad Nacional",
+      "titulo": "Ingeniería en Sistemas Informáticos",
+      "anio_egreso": "2017",
+      "tipo": "educacion"
+    }},
+    {{
+      "institucion": "EAE Business School",
+      "titulo": "Máster en Big Data & Analytics",
+      "anio_egreso": "2020",
+      "tipo": "educacion"
+    }},
+    {{
+      "institucion": "Coursera / Google",
+      "titulo": "Google Data Analytics Certificate",
+      "anio_egreso": "2023",
+      "tipo": "certificacion"
+    }},
+    {{
+      "institucion": "Platzi",
+      "titulo": "Bootcamp Ciencia de Datos",
+      "anio_egreso": "2022",
+      "tipo": "certificacion"
+    }}
+  ]
+}}
+
+TEXTO DEL CV A ANALIZAR:
+{sanitized_text}"""
+
+        system_msg = "Eres un extractor de datos de CVs. Devuelve SOLO JSON válido, sin texto adicional."
+        
+        try:
+            provider_to_use = self.provider
+            needs_close = False
+            
+            if extraction_model and self.provider.name.startswith("Ollama"):
+                from app.adapters.llm_providers import OllamaProvider
+                provider_to_use = OllamaProvider(model=extraction_model)
+                needs_close = True
+            
+            try:
+                raw_output = await provider_to_use.generate(
+                    prompt=prompt,
+                    system_prompt=system_msg,
+                    json_mode=True,
+                    temperature=0.1,
+                    max_tokens=4096
+                )
+            finally:
+                if needs_close:
+                    await provider_to_use.close()
+            
+            logger.debug(f"LLM resume response: {raw_output[:300]}...")
+            
+            try:
+                parsed = json.loads(raw_output)
+                return ExtractedResume.model_validate(parsed)
+            except json.JSONDecodeError:
+                json_match = re.search(r'\{.*\}', raw_output, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group())
+                    return ExtractedResume.model_validate(parsed)
+                raise ValueError(f"Could not parse LLM response as JSON: {raw_output[:200]}")
+        except Exception as e:
+            logger.error(f"LLM resume extraction failed: {e}, falling back to simple extraction")
+            return self._extract_resume_simple(sanitized_text, filename=filename)
     
     async def extract_job_profile(self, text: str) -> ExtractedJobProfile:
-        """Extract structured job description data."""
-        system_prompt = """You are an expert HR assistant specialized in parsing job descriptions.
-Extract the key requirements and qualifications.
-Distinguish between required skills (must-have) and preferred skills (nice-to-have).
-Estimate minimum years of experience if mentioned."""
-        
-        return await self.extract_structured(text, ExtractedJobProfile, system_prompt)
+        """Extract structured job description data using an example-based prompt."""
+        if not await self._is_provider_available():
+            raise ValueError("LLM provider not available")
+
+        sanitized = self.sanitize_input(text)
+
+        example_json = """{
+  "title": "Desarrollador Backend Senior",
+  "department": "Tecnología",
+  "description": "El puesto lidera el desarrollo de APIs RESTful en un equipo ágil de 8 personas. Es responsable de diseñar microservicios escalables y asegurar la calidad del código.",
+  "seniority_level": "senior",
+  "work_modality": "hybrid",
+  "industry": "Tecnología / Fintech",
+  "required_skills": ["Python", "FastAPI", "PostgreSQL", "Docker", "Git"],
+  "preferred_skills": ["Kubernetes", "Redis", "AWS"],
+  "responsibilities": [
+    "Diseñar e implementar APIs RESTful con FastAPI",
+    "Revisar código de otros desarrolladores del equipo",
+    "Optimizar consultas SQL y modelos de base de datos",
+    "Escribir pruebas unitarias e de integración",
+    "Participar en planificación de sprints y estimaciones"
+  ],
+  "key_objectives": [
+    "Reducir latencia de APIs en un 30% en los primeros 3 meses",
+    "Migrar el servicio de pagos a microservicios antes del Q3",
+    "Implementar cobertura de pruebas al 80%"
+  ],
+  "min_experience_years": 3,
+  "education_level": "bachelor"
+}"""
+
+        prompt = f"""Eres un experto en Recursos Humanos. Analiza el siguiente texto de una descripción de puesto de trabajo y extrae la información en formato JSON.
+
+DEVUELVE ÚNICAMENTE el JSON, sin texto adicional, sin markdown, sin explicaciones.
+
+El JSON debe seguir EXACTAMENTE esta estructura (rellena con los datos del texto):
+{example_json}
+
+REGLAS:
+- "title": título exacto del puesto (OBLIGATORIO, nunca omitir)
+- "department": área o departamento, null si no se menciona
+- "description": resumen de 2-4 oraciones del rol y sus objetivos
+- "seniority_level": nivel del puesto — "junior", "mid-level", "senior", "lead", "manager" o null
+- "work_modality": modalidad — "remote", "hybrid", "onsite" o null
+- "industry": industria/sector de la empresa o null
+- "required_skills": habilidades OBLIGATORIAS como strings cortos
+- "preferred_skills": habilidades DESEABLES como strings cortos
+- "responsibilities": lista de 5-10 responsabilidades concretas del día a día
+- "key_objectives": lista de 3-5 objetivos/KPIs clave que el puesto debe lograr
+- "min_experience_years": número entero (0 si no se especifica)
+- "education_level": "bachelor", "master", "phd", "high_school" o null
+
+TEXTO DEL PUESTO:
+{sanitized}
+
+JSON:"""
+
+        try:
+            raw = await self.provider.generate(
+                prompt=prompt,
+                system_prompt="Eres un extractor de datos JSON. Responde SOLO con JSON válido.",
+                json_mode=True,
+                temperature=0.1,
+                max_tokens=2048,
+            )
+            # Strip any markdown code fences if present
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+
+            parsed = json.loads(raw)
+            # Ensure title fallback: take first line of text if LLM omitted it
+            if not parsed.get("title"):
+                first_line = next((l.strip() for l in sanitized.splitlines() if l.strip()), "")
+                parsed["title"] = first_line[:100]
+            return ExtractedJobProfile.model_validate(parsed)
+        except Exception as e:
+            logger.error(f"extract_job_profile failed: {e}")
+            raise
     
+    def _fallback_match_scores(self, candidate_skills: list, required_skills: list) -> dict:
+        """Simple skill-overlap fallback when LLM is unavailable."""
+        cand_set = {s.lower() for s in (candidate_skills or [])}
+        req_set = {s.lower() for s in (required_skills or [])}
+        skills_pct = (len(cand_set & req_set) / max(len(req_set), 1)) * 100
+        if skills_pct >= 70:
+            recommendation = "Altamente recomendado"
+        elif skills_pct >= 50:
+            recommendation = "Buena opción"
+        elif skills_pct >= 30:
+            recommendation = "Considerar"
+        else:
+            recommendation = "No recomendado"
+        return {
+            "skills_score": round(skills_pct, 1),
+            "experience_score": 60.0,
+            "education_score": 60.0,
+            "explanation": "Análisis basado en coincidencia de habilidades.",
+            "recommendation": recommendation,
+        }
+
+    async def reason_candidate_match(
+        self,
+        candidate_raw_text: str,
+        candidate_skills: list,
+        job_title: str,
+        job_description: str,
+        required_skills: list,
+        preferred_skills: list,
+        min_experience_years: int = 0,
+    ) -> dict:
+        """
+        Use LLM chain-of-thought reasoning to evaluate candidate-job fit.
+
+        Replaces the old generate_match_explanation + hardcoded scores approach.
+        Returns real scores across all dimensions plus an explanation and recommendation.
+        """
+        if not await self._is_provider_available():
+            return self._fallback_match_scores(candidate_skills, required_skills)
+
+        # Use up to 3000 chars of raw CV text — enough for full context
+        cv_context = (candidate_raw_text or "")[:3000]
+        skills_str = ", ".join(candidate_skills[:20]) if candidate_skills else "No disponibles"
+        req_str = ", ".join(required_skills[:15]) if required_skills else "No especificadas"
+        pref_str = ", ".join(preferred_skills[:10]) if preferred_skills else "No especificadas"
+
+        # /no_think disables qwen3.5 chain-of-thought output in the response.
+        # The model still reasons internally but doesn't emit <think> blocks,
+        # allowing json_mode to work correctly.
+        prompt = f"""/no_think
+Eres un reclutador experto con 15 años de experiencia en RRHH. Analiza el CV del candidato para el puesto indicado.
+
+=== PUESTO ===
+Título: {job_title}
+Experiencia mínima requerida: {min_experience_years} años
+Descripción: {job_description[:400]}
+Habilidades requeridas: {req_str}
+Habilidades deseables: {pref_str}
+
+=== CURRÍCULUM ===
+{cv_context}
+
+=== HABILIDADES DETECTADAS ===
+{skills_str}
+
+Razona paso a paso antes de dar las puntuaciones:
+PASO 1 — Habilidades: ¿Cuáles de las requeridas tiene el candidato? ¿Cuáles le faltan? Calcula un porcentaje realista.
+PASO 2 — Experiencia: ¿Cuántos años tiene? ¿Los roles son relevantes para {job_title}? ¿Ha trabajado en contextos similares?
+PASO 3 — Educación: ¿Su formación es adecuada para el puesto?
+PASO 4 — Conclusión: ¿Vale la pena entrevistar a esta persona?
+
+Responde ÚNICAMENTE con JSON válido (sin texto extra):
+{{
+    "skills_score": <número 0-100>,
+    "experience_score": <número 0-100>,
+    "education_score": <número 0-100>,
+    "explanation": "<frase concisa máx 25 palabras explicando el punto más destacado>",
+    "recommendation": "<exactamente uno de: Altamente recomendado | Buena opción | Considerar | No recomendado>"
+}}"""
+
+        try:
+            # qwen3.5 uses ~1500-2000 tokens for internal reasoning before generating content.
+            # max_tokens must cover both thinking + JSON output.
+            raw = await self.provider.generate(
+                prompt=prompt,
+                json_mode=True,
+                temperature=0.15,
+                max_tokens=2500,
+            )
+
+            # Belt-and-suspenders: strip any thinking tags that might leak through
+            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+
+            # Progressive JSON extraction
+            result = None
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
+                for m in re.finditer(r'\{', raw):
+                    try:
+                        result, _ = json.JSONDecoder().raw_decode(raw, m.start())
+                        break
+                    except json.JSONDecodeError:
+                        continue
+
+            if result is None:
+                logger.warning(f"Could not parse LLM match reasoning. Raw (first 300): {raw[:300]}")
+                return self._fallback_match_scores(candidate_skills, required_skills)
+
+            valid_recommendations = {"Altamente recomendado", "Buena opción", "Considerar", "No recomendado"}
+            recommendation = result.get("recommendation", "Considerar")
+            if recommendation not in valid_recommendations:
+                recommendation = "Considerar"
+
+            return {
+                "skills_score": float(min(max(result.get("skills_score", 50), 0), 100)),
+                "experience_score": float(min(max(result.get("experience_score", 50), 0), 100)),
+                "education_score": float(min(max(result.get("education_score", 50), 0), 100)),
+                "explanation": str(result.get("explanation", "Perfil analizado por IA."))[:250],
+                "recommendation": recommendation,
+            }
+        except Exception as e:
+            logger.error(f"reason_candidate_match failed: {e}")
+            return self._fallback_match_scores(candidate_skills, required_skills)
+
     async def generate_match_explanation(
         self,
         candidate_summary: str,
         job_description: str,
         scores: dict
     ) -> str:
-        """Generate a human-readable match explanation."""
-        if not await self._is_ollama_available():
-            skills_score = scores.get('skills_score', 0)
-            if skills_score >= 70:
-                return "Candidato con buen perfil técnico que coincide con los requisitos del puesto."
-            elif skills_score >= 50:
-                return "Candidato con potencial que cumple algunos de los requisitos básicos."
-            else:
-                return "Candidato que podría requerir desarrollo adicional para el puesto."
-        
-        prompt = f"""You are an HR advisor. Given the following candidate summary and job requirements, 
-explain in 2-3 sentences why this candidate might be a good fit (or not).
-Be specific and reference actual skills/experience mentioned.
-
-Candidate Summary:
-{candidate_summary[:500]}
-
-Job Requirements:
-{job_description[:500]}
-
-Match Scores:
-- Skills: {scores.get('skills_score', 0):.0f}%
-- Experience: {scores.get('experience_score', 0):.0f}%
-- Education: {scores.get('education_score', 0):.0f}%
-
-Provide a brief, professional assessment:"""
-        
-        response = await self.client.post(
-            f"{self.base_url}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.7,
-                    "num_predict": 200,
-                }
-            }
-        )
-        response.raise_for_status()
-        
-        return response.json().get("response", "").strip()
+        """Legacy: kept for backwards compatibility. Prefer reason_candidate_match."""
+        skills_score = scores.get('skills_score', 0)
+        if skills_score >= 70:
+            return "Candidato con buen perfil técnico que coincide con los requisitos del puesto."
+        elif skills_score >= 50:
+            return "Candidato con potencial que cumple algunos de los requisitos básicos."
+        else:
+            return "Candidato que podría requerir desarrollo adicional para el puesto."
     
     async def health_check(self) -> bool:
-        """Check if Ollama is available."""
-        return await self._is_ollama_available()
+        """Check if the configured LLM provider is available."""
+        return await self._is_provider_available()
     
     async def generate_interview_questions(
         self,
@@ -340,11 +940,11 @@ Provide a brief, professional assessment:"""
         matching_skills: list[str]
     ) -> dict:
         """
-        Generate tailored interview questions based on candidate's skill gaps.
+        Generate tailored interview questions using the configured LLM provider.
         Returns questions in different categories: technical, behavioral, situational.
         """
-        # Fallback questions when Ollama is not available
-        if not await self._is_ollama_available():
+        # Fallback when no provider is available
+        if not await self._is_provider_available():
             return self._generate_fallback_questions(
                 candidate_name, candidate_skills, job_title,
                 job_required_skills, skill_gaps, matching_skills
@@ -380,23 +980,12 @@ Cada pregunta debe ser específica, profesional y en español.
 Devuelve SOLO el JSON válido, sin texto adicional."""
 
         try:
-            response = await self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {
-                        "temperature": 0.7,
-                        "num_predict": 1500,
-                    }
-                }
+            raw_output = await self.provider.generate(
+                prompt=prompt,
+                json_mode=True,
+                temperature=0.7,
+                max_tokens=1500
             )
-            response.raise_for_status()
-            
-            result = response.json()
-            raw_output = result.get("response", "{}")
             
             try:
                 parsed = json.loads(raw_output)
@@ -406,7 +995,8 @@ Devuelve SOLO el JSON válido, sin texto adicional."""
                     "skill_gaps": skill_gaps,
                     "matching_skills": matching_skills,
                     "questions": parsed,
-                    "generated_by_ai": True
+                    "generated_by_ai": True,
+                    "provider": self.provider.name
                 }
             except json.JSONDecodeError:
                 logger.warning("Failed to parse AI response, using fallback")

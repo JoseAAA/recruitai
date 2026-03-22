@@ -43,6 +43,11 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_FLASH_ATTENTION=1        # 20-40% faster attention on GPU
+      - OLLAMA_KEEP_ALIVE=60m           # Keep model in VRAM 60 min (avoid cold-start per upload session)
+      - OLLAMA_NUM_PARALLEL=2           # Allow 2 concurrent requests (extraction + embedding overlap)
+      - OLLAMA_MAX_LOADED_MODELS=2      # Keep both gemma3:4b and nomic-embed-text in VRAM
     networks:
       - recruitai-network
     deploy:
@@ -52,7 +57,28 @@ services:
             - driver: nvidia
               count: all
               capabilities: [ gpu ]
-    # Falls back to CPU if no GPU available
+
+  # MinIO S3-compatible Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: recruitai-minio
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web Console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-recruitai}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-recruitai_secret}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - recruitai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
     # FastAPI Backend
   backend:
@@ -62,26 +88,25 @@ services:
     container_name: recruitai-backend
     ports:
       - "8000:8000"
+    env_file:
+      - .env                          # Fuente única de configuración
     environment:
+      # Overrides de red interna Docker (usan nombres de servicios, no localhost)
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-recruitai}:${POSTGRES_PASSWORD:-recruitai_secret}@postgres:5432/${POSTGRES_DB:-recruitai_db}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - OLLAMA_HOST=http://ollama:11434
-      - JWT_SECRET=${JWT_SECRET:-super-secret-key-change-in-production}
-      - ENVIRONMENT=${ENVIRONMENT:-development}
-      # LLM Configuration
-      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-recruitai}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-recruitai_secret}
     volumes:
       - ./backend:/app
       - ./uploads:/app/uploads
     depends_on:
       - qdrant
       - postgres
+      - ollama
+      - minio
     restart: unless-stopped
     networks:
       - recruitai-network
@@ -123,6 +148,7 @@ volumes:
   qdrant_data:
   postgres_data:
   ollama_data:
+  minio_data:
 
 
 networks:

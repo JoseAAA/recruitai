@@ -31,6 +31,13 @@ const CandidateDetailPage: React.FC = () => {
     const [interviewQuestions, setInterviewQuestions] = useState<InterviewQuestionsResponse | null>(null);
     const [generatingQuestions, setGeneratingQuestions] = useState(false);
 
+    // Delete confirmation
+    const [showDeleteModal, setShowDeleteModal] = useState(false);
+    const [deleting, setDeleting] = useState(false);
+
+    // CV file actions
+    const [loadingFile, setLoadingFile] = useState<"preview" | "download" | null>(null);
+
     useEffect(() => {
         async function fetchData() {
             if (!candidateId) return;
@@ -115,6 +122,52 @@ const CandidateDetailPage: React.FC = () => {
             console.error("Failed to generate questions:", err);
         } finally {
             setGeneratingQuestions(false);
+        }
+    };
+
+    const handleDelete = async () => {
+        try {
+            setDeleting(true);
+            await candidatesApi.delete(candidateId);
+            router.push("/candidates");
+        } catch (err) {
+            console.error("Failed to delete candidate:", err);
+            setDeleting(false);
+        }
+    };
+
+    const handleOpenFile = async (disposition: "preview" | "download") => {
+        setLoadingFile(disposition);
+        try {
+            const endpoint = disposition === "preview" ? "preview" : "download";
+            const response = await candidatesApi.getFile(candidateId, endpoint);
+            const blob = new Blob([response.data], {
+                type: response.headers["content-type"] || "application/octet-stream",
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            if (disposition === "download") {
+                const cd = response.headers["content-disposition"] || "";
+                const match = cd.match(/filename="?([^"]+)"?/);
+                a.download = match ? match[1] : "cv.pdf";
+            } else {
+                a.target = "_blank";
+                a.rel = "noopener noreferrer";
+            }
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 10000);
+        } catch (err: any) {
+            const status = err?.response?.status;
+            if (status === 404) {
+                alert("El CV aún no está disponible. Fue subido antes de activarse el almacenamiento de archivos.");
+            } else {
+                alert("Error al abrir el archivo. Intenta de nuevo.");
+            }
+        } finally {
+            setLoadingFile(null);
         }
     };
 
@@ -213,6 +266,23 @@ const CandidateDetailPage: React.FC = () => {
                                         {candidate.email}
                                     </p>
                                 )}
+                                {candidate.phone && (
+                                    <p className="text-slate-500 flex items-center gap-2 mt-1">
+                                        <span className="material-symbols-outlined text-[18px]">phone</span>
+                                        {candidate.phone}
+                                    </p>
+                                )}
+                                {candidate.linkedin && (
+                                    <a
+                                        href={candidate.linkedin.startsWith('http') ? candidate.linkedin : `https://${candidate.linkedin}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-primary flex items-center gap-2 mt-1 hover:underline"
+                                    >
+                                        <span className="material-symbols-outlined text-[18px]">link</span>
+                                        LinkedIn
+                                    </a>
+                                )}
 
                                 {/* Star Rating */}
                                 <div className="flex items-center gap-1 mt-2">
@@ -251,8 +321,8 @@ const CandidateDetailPage: React.FC = () => {
                             </div>
                         </div>
 
-                        {/* Quick Stats */}
-                        <div className="flex flex-wrap gap-6 mt-6 pt-6 border-t border-slate-200 dark:border-slate-700">
+                        {/* Quick Stats + CV Buttons */}
+                        <div className="flex flex-wrap items-center gap-6 mt-6 pt-6 border-t border-slate-200 dark:border-slate-700">
                             <div>
                                 <p className="text-xs text-slate-500 uppercase tracking-wider mb-1">Experiencia</p>
                                 <p className="text-lg font-bold text-slate-900 dark:text-white">
@@ -270,6 +340,28 @@ const CandidateDetailPage: React.FC = () => {
                                 <p className="text-lg font-bold text-slate-900 dark:text-white">
                                     {candidate.experience?.length || 0}
                                 </p>
+                            </div>
+                            <div className="ml-auto flex gap-2">
+                                <button
+                                    onClick={() => handleOpenFile("preview")}
+                                    disabled={loadingFile !== null}
+                                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-500/10 text-blue-500 hover:bg-blue-500/20 font-medium text-sm transition-colors disabled:opacity-50"
+                                >
+                                    <span className="material-symbols-outlined text-[18px]">
+                                        {loadingFile === "preview" ? "sync" : "visibility"}
+                                    </span>
+                                    {loadingFile === "preview" ? "Cargando..." : "Ver CV"}
+                                </button>
+                                <button
+                                    onClick={() => handleOpenFile("download")}
+                                    disabled={loadingFile !== null}
+                                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 font-medium text-sm transition-colors disabled:opacity-50"
+                                >
+                                    <span className="material-symbols-outlined text-[18px]">
+                                        {loadingFile === "download" ? "sync" : "download"}
+                                    </span>
+                                    {loadingFile === "download" ? "Descargando..." : "Descargar"}
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -325,6 +417,15 @@ const CandidateDetailPage: React.FC = () => {
                             >
                                 <span className="material-symbols-outlined">thumb_down</span>
                                 Rechazar
+                            </button>
+
+                            {/* Delete Button */}
+                            <button
+                                onClick={() => setShowDeleteModal(true)}
+                                className="w-full flex items-center gap-3 px-4 py-3 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-500 font-medium hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-500 hover:border-red-300 transition-colors"
+                            >
+                                <span className="material-symbols-outlined">delete</span>
+                                Eliminar Candidato
                             </button>
                         </div>
                     </div>
@@ -589,21 +690,61 @@ const CandidateDetailPage: React.FC = () => {
                         </h3>
                         {candidate.experience?.length > 0 ? (
                             <div className="relative pl-6 border-l-2 border-slate-200 dark:border-slate-700 space-y-6">
-                                {candidate.experience.map((exp, i) => (
-                                    <div key={i} className="relative">
-                                        <div className="absolute -left-[29px] w-4 h-4 rounded-full bg-emerald-500 border-4 border-white dark:border-slate-800"></div>
-                                        <div>
-                                            <h4 className="font-bold text-slate-900 dark:text-white">{exp.title}</h4>
-                                            <p className="text-primary font-medium">{exp.company}</p>
-                                            <p className="text-sm text-slate-500 mt-1">
-                                                {exp.start_date || "?"} - {exp.end_date || "Presente"}
-                                            </p>
-                                            {exp.description && (
-                                                <p className="text-slate-600 dark:text-slate-400 mt-2 text-sm">{exp.description}</p>
-                                            )}
+                                {candidate.experience.map((exp, i) => {
+                                    // Extract periodo from description (format: "Periodo: Enero 2021 - Mayo 2024\nLogro1\nLogro2")
+                                    const descLines = (exp.description || "").split("\n");
+                                    const periodoLine = descLines.find((l: string) => l.startsWith("Periodo:"));
+                                    const periodoRaw = periodoLine ? periodoLine.replace("Periodo: ", "").trim() : null;
+                                    // Treat "null", empty, or single dash as no period
+                                    const periodo = (periodoRaw && periodoRaw !== "null" && periodoRaw !== "-" && periodoRaw !== " - ") ? periodoRaw : null;
+                                    const logros = descLines.filter((l: string) => !l.startsWith("Periodo:") && l.trim());
+
+                                    // Format ISO date "2021-12-01" → "Dic 2021"
+                                    const formatDate = (d: string | null | undefined): string => {
+                                        if (!d || d === "null") return "";
+                                        const match = d.match(/^(\d{4})-(\d{2})/);
+                                        if (!match) return d;
+                                        const months = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+                                        return `${months[parseInt(match[2], 10) - 1]} ${match[1]}`;
+                                    };
+
+                                    // Determine date display
+                                    let dateDisplay = periodo;
+                                    if (!dateDisplay) {
+                                        const start = exp.start_date ? formatDate(exp.start_date) : null;
+                                        const end = exp.is_current ? "Presente" : (exp.end_date ? formatDate(exp.end_date) : "Presente");
+                                        dateDisplay = start ? `${start} - ${end}` : end;
+                                    }
+
+                                    return (
+                                        <div key={i} className="relative">
+                                            <div className={`absolute -left-[29px] w-4 h-4 rounded-full border-4 border-white dark:border-slate-800 ${
+                                                exp.is_current ? "bg-emerald-500" : "bg-blue-500"
+                                            }`}></div>
+                                            <div>
+                                                <h4 className="font-bold text-slate-900 dark:text-white">{exp.title}</h4>
+                                                <p className="text-primary font-medium">{exp.company}</p>
+                                                <p className="text-sm text-slate-500 mt-1 flex items-center gap-1">
+                                                    <span className="material-symbols-outlined text-[16px]">calendar_today</span>
+                                                    {dateDisplay}
+                                                    {exp.is_current && (
+                                                        <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400">Actual</span>
+                                                    )}
+                                                </p>
+                                                {logros.length > 0 && (
+                                                    <ul className="mt-2 space-y-1">
+                                                        {logros.map((logro: string, li: number) => (
+                                                            <li key={li} className="text-slate-600 dark:text-slate-400 text-sm flex items-start gap-2">
+                                                                <span className="text-emerald-500 mt-0.5">•</span>
+                                                                {logro}
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                )}
+                                            </div>
                                         </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         ) : (
                             <div className="text-center py-8 text-slate-500">
@@ -613,36 +754,69 @@ const CandidateDetailPage: React.FC = () => {
                         )}
                     </div>
 
-                    {/* Education Card */}
-                    <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
-                        <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
-                            <span className="material-symbols-outlined text-amber-500">school</span>
-                            Educación
-                        </h3>
-                        {candidate.education?.length > 0 ? (
-                            <div className="space-y-4">
-                                {candidate.education.map((edu, i) => (
-                                    <div key={i} className="flex items-start gap-4 p-4 rounded-lg bg-slate-50 dark:bg-slate-800/50">
-                                        <div className="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center flex-shrink-0">
-                                            <span className="material-symbols-outlined text-amber-500">school</span>
+                    {/* Education - Two Groups */}
+                    {(() => {
+                        const educacion = (candidate.education || []).filter((e: any) => (e.education_type || 'educacion') === 'educacion');
+                        const certificaciones = (candidate.education || []).filter((e: any) => (e.education_type) === 'certificacion');
+                        
+                        return (
+                            <>
+                                {/* Formación Académica */}
+                                <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+                                    <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                                        <span className="material-symbols-outlined text-amber-500">school</span>
+                                        Formación Académica
+                                    </h3>
+                                    {educacion.length > 0 ? (
+                                        <div className="space-y-4">
+                                            {educacion.map((edu: any, i: number) => (
+                                                <div key={i} className="flex items-start gap-4 p-4 rounded-lg bg-slate-50 dark:bg-slate-800/50">
+                                                    <div className="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center flex-shrink-0">
+                                                        <span className="material-symbols-outlined text-amber-500">school</span>
+                                                    </div>
+                                                    <div>
+                                                        <h4 className="font-bold text-slate-900 dark:text-white">{edu.degree}</h4>
+                                                        <p className="text-slate-600 dark:text-slate-400">{edu.institution}</p>
+                                                        {edu.field_of_study && (
+                                                            <p className="text-sm text-slate-500">{edu.field_of_study}</p>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ))}
                                         </div>
-                                        <div>
-                                            <h4 className="font-bold text-slate-900 dark:text-white">{edu.degree}</h4>
-                                            <p className="text-slate-600 dark:text-slate-400">{edu.institution}</p>
-                                            {edu.field_of_study && (
-                                                <p className="text-sm text-slate-500">{edu.field_of_study}</p>
-                                            )}
+                                    ) : (
+                                        <div className="text-center py-6 text-slate-500">
+                                            <span className="material-symbols-outlined text-[28px] block mb-2">school</span>
+                                            <p className="text-sm">No se detectó formación académica</p>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Certificaciones */}
+                                {certificaciones.length > 0 && (
+                                    <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+                                        <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                                            <span className="material-symbols-outlined text-purple-500">workspace_premium</span>
+                                            Certificaciones
+                                        </h3>
+                                        <div className="space-y-3">
+                                            {certificaciones.map((cert: any, i: number) => (
+                                                <div key={i} className="flex items-start gap-4 p-3 rounded-lg bg-purple-50/50 dark:bg-purple-900/10 border border-purple-200/50 dark:border-purple-800/30">
+                                                    <div className="w-9 h-9 rounded-lg bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+                                                        <span className="material-symbols-outlined text-purple-500 text-[20px]">verified</span>
+                                                    </div>
+                                                    <div>
+                                                        <h4 className="font-medium text-slate-900 dark:text-white">{cert.degree}</h4>
+                                                        <p className="text-sm text-slate-500">{cert.institution}</p>
+                                                    </div>
+                                                </div>
+                                            ))}
                                         </div>
                                     </div>
-                                ))}
-                            </div>
-                        ) : (
-                            <div className="text-center py-8 text-slate-500">
-                                <span className="material-symbols-outlined text-[32px] block mb-2">school</span>
-                                <p className="text-sm">No se detectó información educativa</p>
-                            </div>
-                        )}
-                    </div>
+                                )}
+                            </>
+                        );
+                    })()}
                 </div>
             </div>
 
@@ -695,6 +869,51 @@ const CandidateDetailPage: React.FC = () => {
                                     Guardar
                                 </button>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Delete Confirmation Modal */}
+            {showDeleteModal && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 w-full max-w-md shadow-xl">
+                        <div className="text-center mb-6">
+                            <div className="w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/30 mx-auto mb-4 flex items-center justify-center">
+                                <span className="material-symbols-outlined text-red-500 text-[32px]">warning</span>
+                            </div>
+                            <h3 className="text-xl font-bold text-slate-900 dark:text-white mb-2">
+                                ¿Eliminar Candidato?
+                            </h3>
+                            <p className="text-slate-500">
+                                Esta acción eliminará permanentemente a <strong>{candidate.full_name}</strong> y toda su información. No se puede deshacer.
+                            </p>
+                        </div>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => setShowDeleteModal(false)}
+                                disabled={deleting}
+                                className="flex-1 py-2 px-4 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 font-medium hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50"
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                onClick={handleDelete}
+                                disabled={deleting}
+                                className="flex-1 py-2 px-4 rounded-lg bg-red-500 text-white font-medium hover:bg-red-600 disabled:opacity-50 flex items-center justify-center gap-2"
+                            >
+                                {deleting ? (
+                                    <>
+                                        <span className="material-symbols-outlined animate-spin text-[18px]">sync</span>
+                                        Eliminando...
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="material-symbols-outlined text-[18px]">delete</span>
+                                        Sí, Eliminar
+                                    </>
+                                )}
+                            </button>
                         </div>
                     </div>
                 </div>

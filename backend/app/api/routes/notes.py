@@ -162,44 +162,6 @@ async def update_candidate_rating(
     return {"success": True, "rating": rating}
 
 
-@router.patch("/{candidate_id}/status")
-async def update_candidate_status(
-    candidate_id: UUID,
-    status: str,
-    reason: Optional[str] = None,
-    db: AsyncSession = Depends(get_db)
-):
-    """Update candidate status with optional reason."""
-    valid_statuses = ["new", "reviewed", "shortlisted", "interview", "hired", "rejected"]
-    if status not in valid_statuses:
-        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
-    
-    result = await db.execute(
-        select(CandidateDB).where(CandidateDB.id == candidate_id)
-    )
-    candidate = result.scalar_one_or_none()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    
-    previous_status = candidate.status
-    
-    # Create status change note if reason provided
-    if reason:
-        db_note = CandidateNoteDB(
-            candidate_id=candidate_id,
-            note_type="status_change",
-            content=reason,
-            previous_status=previous_status,
-            new_status=status
-        )
-        db.add(db_note)
-    
-    candidate.status = status
-    await db.commit()
-    
-    return {"success": True, "previous_status": previous_status, "new_status": status}
-
-
 # ============ Interview Questions Generator ============
 
 from app.db.models import JobProfileDB

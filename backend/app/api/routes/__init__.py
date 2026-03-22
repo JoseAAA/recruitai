@@ -6,7 +6,7 @@ from .jobs import router as jobs_router
 from .search import router as search_router
 from .stats import router as stats_router
 from .notes import router as notes_router
-from .cloud_sync import router as cloud_sync_router
+from .admin import router as admin_router
 
 __all__ = [
     "auth_router",
@@ -15,7 +15,8 @@ __all__ = [
     "search_router",
     "stats_router",
     "notes_router",
-    "cloud_sync_router",
+    "admin_router",
     "get_current_user",
     "get_current_active_user",
 ]
+

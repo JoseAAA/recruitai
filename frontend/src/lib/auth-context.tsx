@@ -13,6 +13,7 @@ interface User {
 
 interface AuthContextType {
     user: User | null;
+    token: string | null;
     isLoading: boolean;
     isAuthenticated: boolean;
     login: (email: string, password: string) => Promise<void>;
@@ -24,14 +25,16 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
     const [user, setUser] = useState<User | null>(null);
+    const [token, setToken] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const router = useRouter();
 
     // Check for existing session on mount
     useEffect(() => {
-        const token = localStorage.getItem("token");
-        if (token) {
-            fetchUser(token);
+        const storedToken = localStorage.getItem("token");
+        if (storedToken) {
+            setToken(storedToken);
+            fetchUser(storedToken);
         } else {
             setIsLoading(false);
         }
@@ -55,6 +58,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const { access_token } = response.data;
 
         localStorage.setItem("token", access_token);
+        setToken(access_token);
         api.defaults.headers.common["Authorization"] = `Bearer ${access_token}`;
 
         await fetchUser(access_token);
@@ -75,6 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const logout = () => {
         localStorage.removeItem("token");
         delete api.defaults.headers.common["Authorization"];
+        setToken(null);
         setUser(null);
         router.push("/login");
     };
@@ -83,6 +88,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         <AuthContext.Provider
             value={{
                 user,
+                token,
                 isLoading,
                 isAuthenticated: !!user,
                 login,

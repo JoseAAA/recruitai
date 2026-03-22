@@ -6,7 +6,7 @@ Sistema de reclutamiento con IA para análisis automático de CVs y matching int
 
 ### Prerrequisitos
 - Docker & Docker Compose
-- Una API Key de Google Gemini (gratis)
+- API Key de Google Gemini (gratis)
 
 ### 1. Configuración
 
@@ -15,14 +15,15 @@ Sistema de reclutamiento con IA para análisis automático de CVs y matching int
 cp .env.example .env
 ```
 
-Edita `.env` y agrega tu API key de Gemini:
+Edita `.env` y agrega:
 ```env
 GEMINI_API_KEY=tu-api-key-aqui
+JWT_SECRET=genera-una-clave-segura-aqui
 ```
 
-> 💡 **Obtener API Key GRATIS**: [aistudio.google.com](https://aistudio.google.com) → "Get API Key" → Crear nueva key
+> 💡 **Obtener API Key GRATIS**: [aistudio.google.com](https://aistudio.google.com) → "Get API Key"
 
-### 2. Iniciar
+### 2. Iniciar (Desarrollo)
 
 ```bash
 docker compose up -d
@@ -34,6 +35,7 @@ docker compose up -d
 |----------|-----|
 | 🖥️ Dashboard | http://localhost:80 |
 | 📡 API Docs | http://localhost:8000/docs |
+| 🤖 MCP Server | http://localhost:8000/mcp |
 
 ---
 
@@ -41,98 +43,172 @@ docker compose up -d
 
 ### Análisis Automático de CVs
 - **Subida PDF/DOCX** → Extracción automática con IA
-- **Datos estructurados**: Nombre, email, skills, experiencia, educación
-- **Seguridad**: Protección contra prompt injection en 3 capas
+- **Datos estructurados**: Nombre, email, skills, experiencia
+- **Seguridad**: Protección anti-prompt injection (3 capas)
 
 ### Matching Inteligente
-- **Búsqueda semántica** con embeddings (sentence-transformers)
+- **Búsqueda semántica** con embeddings reales
 - **Scoring explicable** con gráficos radar
 - **Ranking por relevancia** a requisitos del puesto
 
 ### Gestión Completa
 - **Candidatos**: CRUD, filtros, notas, rating
-- **Vacantes**: Requisitos, skills, matching
+- **Vacantes**: Requisitos, skills, matching IA
 - **Dashboard**: KPIs, alertas, top candidatos
+
+---
+
+## 🔒 Seguridad & Privacidad
+
+### Cumplimiento LPDP Perú (Ley 29733)
+- **PII Masking**: Datos personales se anonimizan antes de enviar a la IA
+- **Encriptación**: AES-256 para datos sensibles
+- **Auditoría**: Registro de accesos a datos personales
+- **Retención**: Políticas de eliminación automática (2 años)
+
+### Protección de Datos en LLM
+```
+CV Original     →   PII Masker    →   CV Anónimo     →   Gemini API
+"Juan Pérez"        (Presidio)        "[PERSON_1]"        (procesa)
+                         ↓
+                  Mapping Encriptado
+                  (AES-256/Fernet)
+```
+
+### Defensa Anti-Prompt Injection
+- **22+ patrones** de detección
+- **Límites de longitud** (50K caracteres)
+- **Validación de output** (campos requeridos)
 
 ---
 
 ## 🤖 Configuración de IA
 
-### Opción 1: Gemini (Recomendado - Gratis)
+### Gemini (Recomendado - Tier Gratuito)
 ```env
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=tu-api-key
+GEMINI_MODEL=gemini-2.0-flash
 ```
 
-### Opción 2: OpenAI (Pago)
-```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-```
+**Costos estimados:**
+- Tier gratuito: 1,500 requests/día
+- 100 CVs/día ≈ $0.04/día ($1.20/mes)
 
-### Opción 3: Local con Ollama (Gratis, requiere GPU)
+### Ollama Local con Qwen 3.5 (Privacidad Total)
 ```env
 LLM_PROVIDER=ollama
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:7b
+OLLAMA_MODEL=qwen3.5:2b
 ```
+
+**Requisitos**: GPU NVIDIA ~3GB VRAM. Instalar modelo:
+```bash
+ollama pull qwen3.5:2b
+```
+
+> 💡 **Qwen 3.5 es multimodal nativo** — el mismo modelo procesa texto e imágenes. Un solo modelo para todo.
+
+---
+
+## 🔌 MCP Server (AI Agent Integration)
+
+RecruitAI expone un servidor **MCP (Model Context Protocol)** que permite a cualquier cliente AI interactuar con el sistema:
+
+| Cliente | Cómo Conectar |
+|---------|---------------|
+| Claude Desktop | Agregar URL `http://localhost:8000/mcp` en Settings |
+| Cursor | Configurar MCP server en settings.json |
+| ChatGPT | Usar con plugins MCP |
+
+**Tools disponibles** (auto-descubiertas):
+- Upload CV y extracción automática
+- Búsqueda semántica de candidatos
+- Crear/gestionar vacantes
+- Matching candidato-puesto
+- Generar preguntas de entrevista
+- Dashboard y estadísticas
 
 ---
 
 ## 🏗️ Arquitectura
 
 ```
-┌─────────────────┐     ┌─────────────────┐
-│    Frontend     │────▶│     Nginx       │
-│   (Next.js)     │     │  (Reverse Proxy)│
-└─────────────────┘     └────────┬────────┘
-                                 │
-                        ┌────────▼────────┐
-                        │     Backend     │
-                        │    (FastAPI)    │
-                        └───┬────┬────┬───┘
-                            │    │    │
-              ┌─────────────┤    │    ├─────────────┐
-              ▼             ▼    │    ▼             ▼
-        ┌──────────┐  ┌──────────┐  ┌──────────┐
-        │  Qdrant  │  │ Postgres │  │  LLM API │
-        │(Vectors) │  │ (Data)   │  │(Gemini/OA)│
-        └──────────┘  └──────────┘  └──────────┘
+┌──────────────────────┐
+│  AI Clients          │
+│  (Claude/Cursor/etc) │
+└──────────┬───────────┘
+           │ MCP Protocol
+┌──────────▼───────────┐     ┌─────────────────┐
+│    Frontend          │────▶│     Nginx       │
+│   (Next.js)          │     │  (Reverse Proxy)│
+└──────────────────────┘     └────────┬────────┘
+                                      │
+                             ┌────────▼────────┐
+                             │     Backend     │──── PII Masker
+                             │  (FastAPI+MCP)  │     (Presidio)
+                             └───┬────┬────┬───┘
+                                 │    │    │
+               ┌─────────────────┤    │    ├──────────────┐
+               ▼                 ▼    │    ▼              ▼
+         ┌──────────┐      ┌──────────┐  ┌────────────────────┐
+         │  Qdrant  │      │ Postgres │  │  LLM Provider      │
+         │(Vectors) │      │ (Data)   │  │  (Gemini/OpenAI/   │
+         └──────────┘      └──────────┘  │   Qwen3.5 Local)   │
+                                         └────────────────────┘
 ```
 
 ---
 
-## 🔒 Seguridad
+## 🚀 Deploy en Producción
 
-- **Prompt Injection Defense**: 3 capas de protección
-  - Patrones sospechosos (22+ regex)
-  - Límites de longitud (50K caracteres)
-  - Validación de output
-- **JWT Authentication**
-- **CORS configurado**
-- **Tokens OAuth encriptados** (Fernet)
+### 1. Generar claves seguras
+
+```bash
+# JWT Secret
+openssl rand -hex 32
+
+# Encryption Key
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+### 2. Configurar .env
+
+```env
+ENVIRONMENT=production
+JWT_SECRET=<tu-jwt-generado>
+ENCRYPTION_KEY=<tu-fernet-key>
+GEMINI_API_KEY=<tu-api-key>
+POSTGRES_PASSWORD=<password-seguro>
+```
+
+### 3. Iniciar en producción
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
 
 ---
 
 ## 📁 Estructura del Proyecto
 
 ```
-├── backend/           # API FastAPI
+├── backend/
 │   ├── app/
-│   │   ├── adapters/  # LLM, embeddings, Qdrant
-│   │   ├── api/       # Routes
-│   │   ├── core/      # Config, security
-│   │   └── domain/    # Models
+│   │   ├── adapters/      # LLM, embeddings, Qdrant, PII masker
+│   │   ├── api/routes/    # Endpoints REST
+│   │   ├── core/          # Config, security, privacy
+│   │   └── domain/        # Models
 │   └── requirements.txt
 │
-├── frontend/          # Next.js UI
+├── frontend/
 │   └── src/
-│       ├── app/       # Pages
-│       ├── components/# React components
-│       └── lib/       # API client
+│       ├── app/           # Pages
+│       ├── components/    # React components
+│       └── lib/           # API client
 │
-├── docker-compose.yml
-└── .env.example       # Template de configuración
+├── docker-compose.yml          # Desarrollo
+├── docker-compose.prod.yml     # Producción
+└── .env.example
 ```
 
 ---
@@ -143,6 +219,8 @@ OLLAMA_MODEL=qwen2.5:7b
 ```bash
 cd backend
 pip install -r requirements.txt
+# Instalar modelo de NLP para PII
+python -m spacy download es_core_news_sm
 uvicorn app.main:app --reload --port 8000
 ```
 

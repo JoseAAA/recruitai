@@ -7,7 +7,7 @@ from enum import Enum
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class CandidateStatus(str, Enum):
@@ -36,6 +36,30 @@ class EducationLevel(str, Enum):
 
 # ============ Experience & Education Entries ============
 
+class ExperienciaProfesional(BaseModel):
+    cargo: str = ""
+    empresa: str = ""
+    periodo: str = ""  # keep for context
+    fecha_inicio: Optional[str] = None  # format: "YYYY-MM" e.g. "2021-12"
+    fecha_fin: Optional[str] = None     # format: "YYYY-MM" or "Presente"
+    es_trabajo_actual: bool = False
+    resumen_logros: List[str] = Field(default_factory=list)
+
+
+class EducacionProfesional(BaseModel):
+    institucion: str = ""
+    titulo: str = ""
+    anio_egreso: Optional[str] = None  # e.g. "2019"
+    tipo: str = "educacion"  # "educacion" (universidad, maestria, doctorado, instituto) or "certificacion" (bootcamp, curso, especialización)
+
+
+class DatosPersonales(BaseModel):
+    nombre_completo: str
+    telefono: Optional[str] = None
+    email: Optional[str] = None
+    linkedin: Optional[str] = None
+
+# (Manteniendo ExperienceEntry y EducationEntry originales solo para CandidateDB para no romper el resto del sistema, pero no se usan para el prompt LLM ahora)
 class ExperienceEntry(BaseModel):
     """Work experience entry extracted from CV"""
     company: str
@@ -52,7 +76,6 @@ class ExperienceEntry(BaseModel):
             return 0
         end = self.end_date or date.today()
         return (end.year - self.start_date.year) * 12 + (end.month - self.start_date.month)
-
 
 class EducationEntry(BaseModel):
     """Education entry extracted from CV"""
@@ -113,16 +136,36 @@ class JobProfile(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class ScoringDimension(BaseModel):
+    """A single scoring dimension with its weight."""
+    dimension: str
+    weight: float = Field(ge=0, le=1)
+    description: Optional[str] = None
+
+
+DEFAULT_SCORING_CONFIG: List[ScoringDimension] = [
+    ScoringDimension(dimension="skills", weight=0.40, description="Skills técnicos y blandos"),
+    ScoringDimension(dimension="experience", weight=0.35, description="Experiencia laboral relevante"),
+    ScoringDimension(dimension="education", weight=0.25, description="Formación académica"),
+]
+
+
 class ScoreBreakdown(BaseModel):
-    """Detailed score breakdown for explainability"""
-    experience_score: float = Field(ge=0, le=100)
-    education_score: float = Field(ge=0, le=100)
-    skills_score: float = Field(ge=0, le=100)
-    
+    """Detailed score breakdown for explainability — dynamic weights per job."""
+    scores: dict = Field(default_factory=dict)   # {"skills": 85.0, "experience": 70.0, ...}
+    weights: dict = Field(default_factory=dict)  # {"skills": 0.40, "experience": 0.35, ...}
+
+    # Legacy fields — kept for backwards compatibility with existing frontend
+    skills_score: float = Field(default=0.0, ge=0, le=100)
+    experience_score: float = Field(default=0.0, ge=0, le=100)
+    education_score: float = Field(default=0.0, ge=0, le=100)
+
     @property
     def overall_score(self) -> float:
-        """Weighted average of component scores"""
-        # Weights: Skills 40%, Experience 35%, Education 25%
+        """Weighted average using dynamic weights when available, otherwise legacy formula."""
+        if self.scores and self.weights:
+            return sum(self.scores.get(d, 0) * w for d, w in self.weights.items())
+        # Legacy fallback
         return (
             self.skills_score * 0.40 +
             self.experience_score * 0.35 +
@@ -146,24 +189,25 @@ class MatchResult(BaseModel):
         return self.scores.overall_score
 
 
-# ============ LLM Extraction Schemas ============
-
 class ExtractedResume(BaseModel):
-    """Schema for LLM-extracted resume data"""
-    full_name: str = Field(description="Full name of the candidate")
-    email: Optional[str] = Field(default=None, description="Email address")
-    phone: Optional[str] = Field(default=None, description="Phone number")
-    summary: Optional[str] = Field(default=None, description="Professional summary or objective")
-    skills: List[str] = Field(default_factory=list, description="List of technical and soft skills")
-    experience: List[ExperienceEntry] = Field(default_factory=list, description="Work experience entries")
-    education: List[EducationEntry] = Field(default_factory=list, description="Education history")
+    """Schema for LLM-extracted resume data, EXACTLY matching user's Spanish template"""
+    datos_personales: DatosPersonales
+    habilidades: List[str] = Field(default_factory=list)
+    experiencia_profesional: List[ExperienciaProfesional] = Field(default_factory=list)
+    educacion: List[EducacionProfesional] = Field(default_factory=list)
 
 
 class ExtractedJobProfile(BaseModel):
     """Schema for LLM-extracted job description data"""
-    title: str = Field(description="Job title")
-    department: Optional[str] = Field(default=None, description="Department or team")
-    required_skills: List[str] = Field(default_factory=list, description="Required skills")
-    preferred_skills: List[str] = Field(default_factory=list, description="Nice-to-have skills")
-    min_experience_years: int = Field(default=0, description="Minimum years of experience required")
-    education_level: Optional[str] = Field(default=None, description="Required education level")
+    title: str = Field(default="", description="Título exacto del puesto de trabajo")
+    department: Optional[str] = Field(default=None, description="Departamento o área funcional (ej. TI, Recursos Humanos)")
+    description: Optional[str] = Field(default=None, description="Resumen del puesto: qué hace el rol, contexto del equipo y objetivos principales (2-4 oraciones)")
+    seniority_level: Optional[str] = Field(default=None, description="Nivel de seniority: 'junior', 'mid-level', 'senior', 'lead', 'manager', 'director'")
+    work_modality: Optional[str] = Field(default=None, description="Modalidad de trabajo: 'remote', 'hybrid', 'onsite'")
+    industry: Optional[str] = Field(default=None, description="Industria o sector de la empresa (ej. Tecnología, Fintech, Retail, Salud)")
+    required_skills: List[str] = Field(default_factory=list, description="Lista de habilidades técnicas y blandas estrictamente OBLIGATORIAS")
+    preferred_skills: List[str] = Field(default_factory=list, description="Lista de habilidades deseables pero NO obligatorias")
+    responsibilities: List[str] = Field(default_factory=list, description="Lista de responsabilidades y tareas principales del puesto (5-10 items)")
+    key_objectives: List[str] = Field(default_factory=list, description="Objetivos clave o KPIs que el puesto debe lograr en los primeros 6-12 meses (3-5 items)")
+    min_experience_years: int = Field(default=0, description="Años mínimos de experiencia requeridos (solo el número)")
+    education_level: Optional[str] = Field(default=None, description="Nivel de educación formal requerido")

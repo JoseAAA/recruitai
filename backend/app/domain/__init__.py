@@ -2,6 +2,7 @@
 from .models import (
     Candidate,
     CandidateStatus,
+    DEFAULT_SCORING_CONFIG,
     EducationEntry,
     EducationLevel,
     ExperienceEntry,
@@ -11,16 +12,19 @@ from .models import (
     JobStatus,
     MatchResult,
     ScoreBreakdown,
+    ScoringDimension,
 )
 from .services import ExplanationService, ScoringService
 
 __all__ = [
     "Candidate",
     "CandidateStatus",
+    "DEFAULT_SCORING_CONFIG",
     "JobProfile",
     "JobStatus",
     "MatchResult",
     "ScoreBreakdown",
+    "ScoringDimension",
     "ExperienceEntry",
     "EducationEntry",
     "EducationLevel",

@@ -1,0 +1,183 @@
+# ===========================================
+# RecruitAI - Production Docker Compose
+# ===========================================
+# Use: docker compose -f docker-compose.prod.yml up -d
+#
+# Security Features:
+# - No exposed internal ports (postgres, qdrant)
+# - Secrets management
+# - Health checks
+# - Resource limits
+# - Ollama local (100% open source, sin API keys externas)
+
+services:
+  # Vector Database for semantic search
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: recruitai-qdrant
+    # No ports exposed - only accessible from backend
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - recruitai-internal
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:6333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # PostgreSQL for relational data
+  postgres:
+    image: postgres:15-alpine
+    container_name: recruitai-postgres
+    # No ports exposed - only accessible from backend
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - recruitai-internal
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Ollama Local LLM (default — 100% local, no API keys needed)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: recruitai-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - recruitai-internal
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: recruitai-backend
+    # Only expose to nginx, not directly
+    expose:
+      - "8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - JWT_SECRET=${JWT_SECRET}
+      - ENVIRONMENT=production
+      - DEBUG=false
+      # LLM Configuration — 100% local via Ollama (no API keys needed)
+      - OLLAMA_HOST=http://ollama:11434
+      - MATCH_MODEL=${MATCH_MODEL:-gemma3:4b}
+      - EXTRACTION_MODEL=${EXTRACTION_MODEL:-gemma3:4b}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      # Privacy & Security
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      - PII_MASKING_ENABLED=${PII_MASKING_ENABLED:-false}
+      - DATA_RETENTION_DAYS=${DATA_RETENTION_DAYS:-730}
+      - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD:-change-me-on-first-run}
+      - RECRUITER_INITIAL_PASSWORD=${RECRUITER_INITIAL_PASSWORD:-change-me-on-first-run}
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: always
+    networks:
+      - recruitai-internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=/api
+    container_name: recruitai-frontend
+    expose:
+      - "3000"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    networks:
+      - recruitai-internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Nginx Reverse Proxy (only public-facing service)
+  nginx:
+    image: nginx:alpine
+    container_name: recruitai-nginx
+    ports:
+      - "80:80"
+      - "443:443"  # For HTTPS with Let's Encrypt
+    volumes:
+      - ./nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro  # SSL certificates
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    restart: always
+    networks:
+      - recruitai-internal
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+volumes:
+  qdrant_data:
+  postgres_data:
+  uploads_data:
+  ollama_data:
+
+networks:
+  recruitai-internal:
+    driver: bridge
+    internal: false  # Set to true if frontend is served externally

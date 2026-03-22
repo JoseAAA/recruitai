@@ -153,22 +153,59 @@ export function useAI() {
 }
 
 // Convenience hooks for common AI operations
+// NOTE: This now uses the BACKEND API instead of direct browser-to-LLM calls
 export function useJobDescriptionGenerator() {
-    const { provider, isAvailable } = useAI();
     const [isGenerating, setIsGenerating] = useState(false);
+    const [isAvailable, setIsAvailable] = useState(true); // Always available via backend
+    const [error, setError] = useState<string | null>(null);
 
-    const generate = async (prompt: string): Promise<string> => {
-        if (!isAvailable) throw new Error('AI provider not available');
-
+    const generate = async (prompt: string): Promise<{
+        title: string;
+        description: string;
+        required_skills: string[];
+        preferred_skills: string[];
+        min_experience_years: number;
+        education_level: string | null;
+    } | null> => {
         setIsGenerating(true);
+        setError(null);
+
         try {
-            return await provider.generateJobDescription(prompt);
+            const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+            const formData = new FormData();
+            formData.append('description_text', prompt);
+
+            const response = await fetch(`${API_BASE_URL}/api/jobs/analyze`, {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.detail || `Error ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            return {
+                title: data.title || '',
+                description: data.raw_description || prompt,
+                required_skills: data.required_skills || [],
+                preferred_skills: data.preferred_skills || [],
+                min_experience_years: data.min_experience_years || 0,
+                education_level: data.education_level || null,
+            };
+        } catch (err: any) {
+            console.error('AI generation error:', err);
+            setError(err.message || 'Error generando perfil');
+            return null;
         } finally {
             setIsGenerating(false);
         }
     };
 
-    return { generate, isGenerating, isAvailable };
+    return { generate, isGenerating, isAvailable, error };
 }
 
 export function useCandidateAnalysis() {

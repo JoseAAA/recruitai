@@ -1,6 +1,7 @@
 """
 Search and Matching API Routes with PostgreSQL
 """
+import asyncio
 import logging
 from typing import List, Optional
 from uuid import UUID
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters import EmbeddingService, LLMEngine, QdrantRepository
 from app.core.database import get_db
 from app.db.models import CandidateDB, JobProfileDB
-from app.domain import ScoringService
+from app.domain import DEFAULT_SCORING_CONFIG, ScoringService
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,9 @@ class MatchResultResponse(BaseModel):
     experience_score: float
     education_score: float
     skills_score: float
+    dimension_scores: dict = Field(default_factory=dict)  # dynamic per-job scoring
     explanation: str
+    recommendation: str = "Considerar"  # Altamente recomendado | Buena opción | Considerar | No recomendado
     missing_skills: List[str]
     bonus_skills: List[str]
 
@@ -110,7 +113,7 @@ async def semantic_search(
     not just keyword matches.
     """
     # Generate query embedding
-    query_embedding = embedder.embed_text(request.query)
+    query_embedding = await embedder.embed_text(request.query)
     
     # Search in Qdrant
     results = await qdrant.search_similar(
@@ -153,9 +156,9 @@ async def hybrid_search(
     """
     # Generate embeddings for query
     query_vectors = {
-        "skills": embedder.embed_text(request.query),
-        "experience": embedder.embed_text(request.query),
-        "summary": embedder.embed_text(request.query),
+        "skills": await embedder.embed_text(request.query),
+        "experience": await embedder.embed_text(request.query),
+        "summary": await embedder.embed_text(request.query),
     }
     
     # Hybrid search with RRF fusion
@@ -207,112 +210,145 @@ async def match_candidates_to_job(
             detail="Job profile not found"
         )
     
-    # Build query from job requirements
-    job_query = f"{job.title}. {' '.join(job.required_skills or [])}. {job.description or ''}"
-    
-    # Generate embedding for job
-    job_embedding = embedder.embed_text(job_query)
-    
-    # Search for matching candidates in Qdrant
+    # Build per-dimension query texts aligned with how CVs were indexed
+    required_skills = job.required_skills or []
+    preferred_skills = job.preferred_skills or []
+    all_skills = required_skills + preferred_skills
+    responsibilities = job.responsibilities or []
+    key_objectives = job.key_objectives or []
+
+    # skills query — mirrors the CV "Habilidades y tecnologías: ..." format
+    skills_query = (
+        f"Habilidades y tecnologías requeridas: {', '.join(all_skills[:20])}"
+        if all_skills else job.title
+    )
+
+    # experience query — mirrors the CV "Experiencia profesional: ..." format
+    exp_parts = [f"Puesto: {job.title}"]
+    if getattr(job, "seniority_level", None):
+        exp_parts.append(f"Nivel: {job.seniority_level}")
+    if job.min_experience_years:
+        exp_parts.append(f"{job.min_experience_years} años de experiencia mínima")
+    if responsibilities:
+        exp_parts.append(f"Responsabilidades: {'. '.join(responsibilities[:5])}")
+    if key_objectives:
+        exp_parts.append(f"Objetivos clave: {'. '.join(key_objectives[:3])}")
+    experience_query = "Experiencia profesional requerida: " + ". ".join(exp_parts)
+
+    # summary query — mirrors the CV "Candidato: ..." summary format
+    top_req = ", ".join(required_skills[:5]) if required_skills else ""
+    summary_query = (
+        f"Perfil buscado para {job.title}"
+        + (f" ({job.seniority_level})" if getattr(job, "seniority_level", None) else "")
+        + (f" en {job.industry}" if getattr(job, "industry", None) else "")
+        + ". "
+        + (f"{job.description} " if job.description else "")
+        + (f"Habilidades clave: {top_req}." if top_req else "")
+    )
+
+    # Embed all 3 queries in parallel
+    skills_emb, experience_emb, summary_emb = await asyncio.gather(
+        embedder.embed_text(skills_query),
+        embedder.embed_text(experience_query),
+        embedder.embed_text(summary_query),
+    )
+
+    query_vectors = {
+        "skills": skills_emb,
+        "experience": experience_emb,
+        "summary": summary_emb,
+    }
+
+    # Hybrid search with RRF fusion, filtered to this job's CVs
     search_results = []
     try:
-        search_results = await qdrant.search_similar(
-            query_vector=job_embedding,
-            vector_name="skills",
+        search_results = await qdrant.hybrid_search(
+            query_vectors=query_vectors,
             limit=request.limit,
+            job_id_filter=str(request.job_id),
         )
     except Exception as e:
-        logger.warning(f"Qdrant search failed: {e}")
-    
-    # FALLBACK: If Qdrant returns no results, fetch all candidates from DB
-    if not search_results:
-        logger.info("No Qdrant results, using database fallback for matching")
-        all_candidates_result = await db.execute(
-            select(CandidateDB).limit(request.limit)
+        logger.warning(f"Qdrant hybrid search failed: {e}")
+
+    # Resolve scoring weights — use job-specific config or fall back to global defaults
+    scoring_dims = job.scoring_config or [d.model_dump() for d in DEFAULT_SCORING_CONFIG]
+    weights = {d["dimension"]: d["weight"] for d in scoring_dims}
+
+    def compute_overall(skills_score: float, experience_score: float, education_score: float) -> float:
+        dim_scores = {"skills": skills_score, "experience": experience_score, "education": education_score}
+        return sum(dim_scores.get(dim, 0) * w for dim, w in weights.items())
+
+    # Build candidate pool:
+    # - Primary: Qdrant vector search (semantic similarity, scoped to job)
+    # - Fallback: DB query when Qdrant returns nothing (e.g. new candidates not yet indexed)
+    candidate_pool: List[CandidateDB] = []
+
+    if search_results:
+        for candidate_id_str, _, _ in search_results:
+            c_result = await db.execute(
+                select(CandidateDB).where(CandidateDB.id == UUID(candidate_id_str))
+            )
+            candidate = c_result.scalar_one_or_none()
+            if candidate:
+                candidate_pool.append(candidate)
+    else:
+        logger.info("No Qdrant results — using DB fallback for matching")
+        all_result = await db.execute(
+            select(CandidateDB).where(CandidateDB.job_id == request.job_id).limit(request.limit)
         )
-        all_candidates = all_candidates_result.scalars().all()
-        
-        matches = []
-        for candidate in all_candidates:
-            # Calculate scores based on skills overlap
-            candidate_skills = set(s.lower() for s in (candidate.skills or []))
-            required_skills = set(s.lower() for s in (job.required_skills or []))
-            preferred_skills = set(s.lower() for s in (job.preferred_skills or []))
-            
-            matching_required = len(candidate_skills & required_skills)
-            matching_preferred = len(candidate_skills & preferred_skills)
-            total_required = len(required_skills) or 1
-            
-            skills_score = (matching_required / total_required) * 100
-            overall_score = skills_score * 0.7 + matching_preferred * 5  # Bonus for preferred skills
-            
-            missing = list(required_skills - candidate_skills)
-            bonus = list(candidate_skills & preferred_skills)
-            
-            matches.append(MatchResultResponse(
-                candidate_id=str(candidate.id),
-                full_name=candidate.full_name,
-                overall_score=round(min(overall_score, 100), 1),
-                experience_score=70.0,
-                education_score=70.0,
-                skills_score=round(skills_score, 1),
-                explanation=f"Candidato con {len(candidate_skills)} habilidades. Coincide {matching_required}/{total_required} requeridas.",
-                missing_skills=missing[:5],
-                bonus_skills=bonus[:5],
-            ))
-        
-        # Sort by overall score
-        matches.sort(key=lambda x: x.overall_score, reverse=True)
-        
-        return MatchResponse(
-            job_id=job.id,
-            job_title=job.title,
-            matches=matches,
-            total=len(matches),
-        )
-    
-    # Calculate detailed scores for each match from Qdrant
+        candidate_pool = list(all_result.scalars().all())
+
+    required_skills_lower = set(s.lower() for s in (job.required_skills or []))
+    preferred_skills_lower = set(s.lower() for s in (job.preferred_skills or []))
+    job_description_text = job.description or job.title
+
+    # Score each candidate using LLM reasoning (qwen3.5 chain-of-thought)
     matches = []
-    for candidate_id, vector_score, payload in search_results:
-        # Get full candidate data from database
-        c_result = await db.execute(
-            select(CandidateDB).where(CandidateDB.id == UUID(candidate_id))
+    for candidate in candidate_pool:
+        candidate_skills_lower = set(s.lower() for s in (candidate.skills or []))
+
+        # LLM reasons about all 3 dimensions using the full CV text
+        reasoning = await llm.reason_candidate_match(
+            candidate_raw_text=candidate.raw_text or "",
+            candidate_skills=candidate.skills or [],
+            job_title=job.title,
+            job_description=job_description_text,
+            required_skills=job.required_skills or [],
+            preferred_skills=job.preferred_skills or [],
+            min_experience_years=job.min_experience_years or 0,
         )
-        candidate = c_result.scalar_one_or_none()
-        
-        if not candidate:
-            continue
-        
-        # Simple scoring based on skills overlap
-        candidate_skills = set(s.lower() for s in (candidate.skills or []))
-        required_skills = set(s.lower() for s in (job.required_skills or []))
-        preferred_skills = set(s.lower() for s in (job.preferred_skills or []))
-        
-        matching_required = len(candidate_skills & required_skills)
-        matching_preferred = len(candidate_skills & preferred_skills)
-        total_required = len(required_skills) or 1
-        
-        skills_score = (matching_required / total_required) * 100
-        overall_score = skills_score * 0.7 + (vector_score * 100) * 0.3
-        
-        missing = list(required_skills - candidate_skills)
-        bonus = list(candidate_skills & preferred_skills)
-        
+
+        skills_score = reasoning["skills_score"]
+        experience_score = reasoning["experience_score"]
+        education_score = reasoning["education_score"]
+        explanation = reasoning["explanation"]
+        recommendation = reasoning["recommendation"]
+
+        overall_score = compute_overall(skills_score, experience_score, education_score)
+
+        missing = [s for s in (job.required_skills or []) if s.lower() not in candidate_skills_lower]
+        bonus = [s for s in (candidate.skills or []) if s.lower() in preferred_skills_lower]
+
         matches.append(MatchResultResponse(
-            candidate_id=candidate_id,
+            candidate_id=str(candidate.id),
             full_name=candidate.full_name,
-            overall_score=round(overall_score, 1),
-            experience_score=70.0,  # Placeholder
-            education_score=70.0,   # Placeholder
+            overall_score=round(min(overall_score, 100), 1),
+            experience_score=round(experience_score, 1),
+            education_score=round(education_score, 1),
             skills_score=round(skills_score, 1),
-            explanation=f"Candidato con {len(candidate_skills)} habilidades. Coincide {matching_required}/{total_required} requeridas.",
+            dimension_scores={
+                "skills": round(skills_score, 1),
+                "experience": round(experience_score, 1),
+                "education": round(education_score, 1),
+            },
+            explanation=explanation,
+            recommendation=recommendation,
             missing_skills=missing[:5],
             bonus_skills=bonus[:5],
         ))
-    
-    # Sort by overall score
+
     matches.sort(key=lambda x: x.overall_score, reverse=True)
-    
+
     return MatchResponse(
         job_id=job.id,
         job_title=job.title,

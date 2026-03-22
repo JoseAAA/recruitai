@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import FileUploadZone from "./FileUploadZone";
-import { candidatesApi, UploadResponse } from "@/lib/api";
+import { candidatesApi, jobsApi, JobProfile, UploadResponse } from "@/lib/api";
 
 interface DataSource {
     id: string;
@@ -23,6 +24,7 @@ interface ActivityItem {
 }
 
 const DataIngestion: React.FC = () => {
+    const searchParams = useSearchParams();
     // Simplified data sources - no complex OAuth required
     const [sources] = useState<DataSource[]>([
         {
@@ -52,6 +54,18 @@ const DataIngestion: React.FC = () => {
     const [currentFile, setCurrentFile] = useState("");
     const [uploadResults, setUploadResults] = useState<UploadResponse[]>([]);
     const [error, setError] = useState<string | null>(null);
+    const [jobs, setJobs] = useState<JobProfile[]>([]);
+    const [selectedJobId, setSelectedJobId] = useState<string>("");
+
+    useEffect(() => {
+        jobsApi.list().then(res => {
+            const activeJobs = res.data.items.filter(j => j.status === "active");
+            setJobs(activeJobs);
+            // Pre-select job if job_id is in URL (e.g. coming from job card)
+            const urlJobId = searchParams?.get("job_id");
+            if (urlJobId) setSelectedJobId(urlJobId);
+        }).catch(() => {});
+    }, [searchParams]);
 
     const handleFilesSelected = async (files: File[]) => {
         if (files.length === 0) return;
@@ -64,6 +78,7 @@ const DataIngestion: React.FC = () => {
         try {
             const results = await candidatesApi.uploadMultiple(
                 files,
+                selectedJobId || undefined,
                 (current, total, filename) => {
                     setCurrentFile(filename);
                     setUploadProgress(Math.round((current / total) * 100));
@@ -227,6 +242,31 @@ const DataIngestion: React.FC = () => {
                         </button>
                     </div>
 
+                    {/* Job selector — scope CVs to a specific position */}
+                    <div className="mb-4">
+                        <label className="block text-sm font-medium text-slate-300 mb-1">
+                            Asociar CVs a puesto de trabajo
+                        </label>
+                        <select
+                            value={selectedJobId}
+                            onChange={e => setSelectedJobId(e.target.value)}
+                            className="w-full bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        >
+                            <option value="">Sin asociar (general)</option>
+                            {jobs.map(j => (
+                                <option key={j.id} value={j.id}>
+                                    {j.title}{j.department ? ` — ${j.department}` : ""}
+                                    {j.candidate_count != null ? ` (${j.candidate_count} CVs)` : ""}
+                                </option>
+                            ))}
+                        </select>
+                        {selectedJobId && (
+                            <p className="mt-1 text-xs text-indigo-400">
+                                Los CVs subidos se asociarán al puesto seleccionado y el matching solo buscará entre ellos.
+                            </p>
+                        )}
+                    </div>
+
                     <FileUploadZone
                         onFilesSelected={handleFilesSelected}
                         isUploading={isUploading}
@@ -384,8 +424,8 @@ const DataIngestion: React.FC = () => {
                             1
                         </div>
                         <div>
-                            <p className="font-medium text-slate-200">Ingesta Centralizada</p>
-                            <p className="text-slate-400">Todos los CVs entran al pool central</p>
+                            <p className="font-medium text-slate-200">Sube CVs por puesto</p>
+                            <p className="text-slate-400">Selecciona el puesto antes de subir para que el matching sea preciso y económico</p>
                         </div>
                     </div>
                     <div className="flex items-start gap-3">

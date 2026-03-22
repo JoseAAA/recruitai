@@ -1,9 +1,17 @@
-# Environment
+# ===========================================
+# Environment & Secrets (NEVER commit these)
+# ===========================================
 .env
 .env.local
 .env.production
+.env.*.local
+secrets/
+*.key
+*.pem
 
+# ===========================================
 # Python
+# ===========================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -17,33 +25,60 @@ ENV/
 .pytest_cache/
 .coverage
 htmlcov/
+.mypy_cache/
 
-# Node
+# ===========================================
+# Node.js
+# ===========================================
 node_modules/
 .next/
 out/
 .npm
 *.tsbuildinfo
+.turbo
 
-# IDE
+# ===========================================
+# IDE & Editors
+# ===========================================
 .idea/
 .vscode/
 *.swp
 *.swo
 .DS_Store
+Thumbs.db
 
+# ===========================================
 # Docker
+# ===========================================
 docker-compose.override.yml
 
-# Uploads and data
+# ===========================================
+# Uploads and User Data
+# ===========================================
 uploads/
 *.pdf
 *.docx
+*.doc
 
+# ===========================================
 # Logs
+# ===========================================
 *.log
 logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Build
+# ===========================================
+# Build Artifacts
+# ===========================================
 dist/
 build/
+.cache/
+
+# ===========================================
+# SSL Certificates
+# ===========================================
+certs/
+*.crt
+*.pem

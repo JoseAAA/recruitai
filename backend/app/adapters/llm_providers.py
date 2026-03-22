@@ -4,6 +4,7 @@ Supports: Ollama (local), OpenAI, Google Gemini
 """
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Optional, Type, TypeVar
 
@@ -26,7 +27,8 @@ class LLMProvider(ABC):
         prompt: str,
         json_mode: bool = False,
         temperature: float = 0.1,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        system_prompt: str = None,
     ) -> str:
         """Generate text from prompt."""
         pass
@@ -34,6 +36,10 @@ class LLMProvider(ABC):
     @abstractmethod
     async def is_available(self) -> bool:
         """Check if provider is available."""
+        pass
+    
+    async def close(self):
+        """Close any open connections. Override in subclasses."""
         pass
     
     @property
@@ -44,11 +50,11 @@ class LLMProvider(ABC):
 
 
 class OllamaProvider(LLMProvider):
-    """Ollama local LLM provider."""
+    """Ollama local LLM provider — Edge AI, 100% privado."""
     
-    def __init__(self, client: Optional[httpx.AsyncClient] = None):
+    def __init__(self, client: Optional[httpx.AsyncClient] = None, model: Optional[str] = None):
         self.base_url = settings.OLLAMA_HOST
-        self.model = settings.OLLAMA_MODEL
+        self.model = model or settings.MATCH_MODEL
         self._client = client
     
     @property
@@ -57,16 +63,36 @@ class OllamaProvider(LLMProvider):
             self._client = httpx.AsyncClient(timeout=120.0)
         return self._client
     
+    async def close(self):
+        """Close HTTP client to free connections."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+    
     @property
     def name(self) -> str:
         return f"Ollama ({self.model})"
     
     async def is_available(self) -> bool:
+        """Check if Ollama is running AND has the configured model installed."""
         try:
             response = await self.client.get(f"{self.base_url}/api/tags", timeout=5.0)
             if response.status_code == 200:
                 data = response.json()
-                return len(data.get("models", [])) > 0
+                models = data.get("models", [])
+                model_names = [m.get("name", "") for m in models]
+                
+                # Check if the CONFIGURED model is installed
+                for name in model_names:
+                    if self.model in name:
+                        return True
+                
+                # Model not found — tell user which models exist
+                logger.warning(
+                    f"Ollama running but model '{self.model}' not found. "
+                    f"Available: {model_names}. Run: ollama pull {self.model}"
+                )
+                return False
             return False
         except Exception as e:
             logger.warning(f"Ollama not available: {e}")
@@ -77,26 +103,77 @@ class OllamaProvider(LLMProvider):
         prompt: str,
         json_mode: bool = False,
         temperature: float = 0.1,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        system_prompt: str = None,
     ) -> str:
+        """
+        Generate text using Ollama /api/chat endpoint.
+        
+        Uses /api/chat instead of /api/generate because:
+        - Supports system role → better instruction following
+        - Standard message format compatible with all models
+        - Better structured output for Qwen 3.5
+        """
+        messages = []
+        
+        # System prompt — gives the model its role/instructions
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        
+        # User message — the actual prompt
+        messages.append({"role": "user", "content": prompt})
+        
+        # Auto-detect /no_think token: translates prompt hint to Ollama API param.
+        # This is critical for qwen3.5 — without "think": false the model spends
+        # all num_predict tokens on chain-of-thought and emits empty content.
+        has_no_think = any(
+            msg.get("content", "").lstrip().startswith("/no_think")
+            for msg in messages
+            if msg.get("role") == "user"
+        )
+        if has_no_think:
+            # Strip the /no_think prefix from the user message (already handled by API param)
+            for msg in messages:
+                if msg.get("role") == "user":
+                    msg["content"] = re.sub(r"^/no_think\s*\n?", "", msg["content"].lstrip(), count=1)
+
         request_body = {
             "model": self.model,
-            "prompt": prompt,
+            "messages": messages,
             "stream": False,
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
             }
         }
+        if has_no_think:
+            request_body["think"] = False
         if json_mode:
             request_body["format"] = "json"
         
         response = await self.client.post(
-            f"{self.base_url}/api/generate",
+            f"{self.base_url}/api/chat",
             json=request_body
         )
         response.raise_for_status()
-        return response.json().get("response", "")
+        data = response.json()
+
+        # /api/chat returns {"message": {"role": "assistant", "content": "...", "thinking": "..."}}
+        # qwen3.5 uses a separate "thinking" field for chain-of-thought reasoning.
+        # When thinking is enabled and the final answer is also JSON, both fields are populated.
+        # We prefer "content" (the actual answer), but fall back to "thinking" only as a last resort.
+        message = data.get("message", {})
+        content = message.get("content", "")
+        thinking = message.get("thinking", "")
+
+        # If content is empty but thinking has data, the model put its response in thinking.
+        # This happens when json_mode+thinking fills tokens before generating a separate content.
+        # In that case extract any JSON from the thinking block.
+        if not content.strip() and thinking.strip():
+            logger.debug(f"Ollama: content empty, using thinking field ({len(thinking)} chars)")
+            return thinking
+
+        return content
 
 
 class OpenAIProvider(LLMProvider):
@@ -120,6 +197,11 @@ class OpenAIProvider(LLMProvider):
             )
         return self._client
     
+    async def close(self):
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+    
     @property
     def name(self) -> str:
         return f"OpenAI ({self.model})"
@@ -141,13 +223,17 @@ class OpenAIProvider(LLMProvider):
         prompt: str,
         json_mode: bool = False,
         temperature: float = 0.1,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        system_prompt: str = None,
     ) -> str:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
         request_body = {
             "model": self.model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
+            "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens
         }
@@ -178,6 +264,11 @@ class GeminiProvider(LLMProvider):
             self._client = httpx.AsyncClient(timeout=120.0)
         return self._client
     
+    async def close(self):
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+    
     @property
     def name(self) -> str:
         return f"Gemini ({self.model})"
@@ -202,14 +293,25 @@ class GeminiProvider(LLMProvider):
         prompt: str,
         json_mode: bool = False,
         temperature: float = 0.1,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        max_retries: int = 3,
+        system_prompt: str = None,
     ) -> str:
+        """
+        Generate text with automatic retry on rate limit (429) errors.
+        Uses exponential backoff: 1s, 2s, 4s delays between retries.
+        """
+        import asyncio
+        
         # Gemini uses different endpoint structure
         url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
         
+        # Gemini REST API: system instructions go as a separate field
+        full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+        
         request_body = {
             "contents": [
-                {"parts": [{"text": prompt}]}
+                {"parts": [{"text": full_prompt}]}
             ],
             "generationConfig": {
                 "temperature": temperature,
@@ -220,16 +322,47 @@ class GeminiProvider(LLMProvider):
         if json_mode:
             request_body["generationConfig"]["responseMimeType"] = "application/json"
         
-        response = await self.client.post(url, json=request_body)
-        response.raise_for_status()
-        data = response.json()
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.post(url, json=request_body)
+                
+                # Handle rate limiting with retry
+                if response.status_code == 429:
+                    wait_time = 2 ** attempt  # 1, 2, 4 seconds
+                    logger.warning(
+                        f"Gemini rate limit (429), retry {attempt + 1}/{max_retries} "
+                        f"in {wait_time}s"
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                # Extract text from Gemini response structure
+                try:
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                except (KeyError, IndexError) as e:
+                    logger.error(f"Failed to parse Gemini response: {e}")
+                    return ""
+                    
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                if e.response.status_code == 429:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"Gemini rate limit, waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                raise
+            except Exception as e:
+                last_error = e
+                logger.error(f"Gemini generate error: {e}")
+                raise
         
-        # Extract text from Gemini response structure
-        try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError) as e:
-            logger.error(f"Failed to parse Gemini response: {e}")
-            return ""
+        # All retries exhausted
+        logger.error(f"Gemini max retries exceeded. Last error: {last_error}")
+        raise Exception(f"Gemini API rate limit exceeded after {max_retries} retries")
 
 
 def get_llm_provider() -> LLMProvider:

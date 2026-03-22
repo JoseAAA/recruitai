@@ -22,7 +22,7 @@ class QdrantRepository:
     """
     
     COLLECTION_NAME = "candidates"
-    VECTOR_SIZE = 384  # For all-MiniLM-L6-v2 or similar
+    VECTOR_SIZE = 768  # nomic-embed-text via Ollama
     
     VECTOR_NAMES = ["experience", "education", "skills", "summary"]
     
@@ -109,25 +109,27 @@ class QdrantRepository:
                 ]
             )
         
-        results = self.client.search(
+        results = self.client.query_points(
             collection_name=self.COLLECTION_NAME,
-            query_vector=(vector_name, query_vector),
+            query=query_vector,
+            using=vector_name,
             limit=limit,
             score_threshold=score_threshold,
             query_filter=qdrant_filter,
             with_payload=True
         )
-        
+
         return [
-            (hit.id, hit.score, hit.payload)
-            for hit in results
+            (point.id, point.score, point.payload)
+            for point in results.points
         ]
     
     async def hybrid_search(
         self,
         query_vectors: dict[str, List[float]],
         weights: Optional[dict[str, float]] = None,
-        limit: int = 20
+        limit: int = 20,
+        job_id_filter: Optional[str] = None,
     ) -> List[Tuple[str, float, dict]]:
         """
         Perform hybrid search across multiple named vectors.
@@ -157,11 +159,24 @@ class QdrantRepository:
             if name in query_vectors
         ]
         
+        # Build optional job_id filter
+        qdrant_filter = None
+        if job_id_filter:
+            qdrant_filter = qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="job_id",
+                        match=qmodels.MatchValue(value=job_id_filter)
+                    )
+                ]
+            )
+
         # Use RRF fusion via Qdrant's query API
         results = self.client.query_points(
             collection_name=self.COLLECTION_NAME,
             prefetch=prefetch_queries,
             query=qmodels.FusionQuery(fusion=qmodels.Fusion.RRF),
+            query_filter=qdrant_filter,
             limit=limit,
             with_payload=True
         )
@@ -184,8 +199,9 @@ class QdrantRepository:
     async def get_collection_info(self) -> dict:
         """Get collection statistics."""
         info = self.client.get_collection(self.COLLECTION_NAME)
+        status = info.status
+        status_val = status.value if hasattr(status, "value") else str(status)
         return {
-            "vectors_count": info.vectors_count,
-            "points_count": info.points_count,
-            "status": info.status.value
+            "points_count": info.points_count or 0,
+            "status": status_val,
         }

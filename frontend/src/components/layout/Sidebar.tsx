@@ -10,9 +10,8 @@ const Sidebar: React.FC = () => {
 
     const navItems = [
         { path: "/", label: "Panel de Control", icon: "dashboard" },
-        { path: "/candidates", label: "Candidatos", icon: "group" },
-        { path: "/jobs", label: "Empleos", icon: "work" },
-        { path: "/data", label: "Centro de Datos", icon: "database" },
+        { path: "/jobs", label: "Perfiles de Puesto", icon: "work" },
+        { path: "/data", label: "Importar CVs", icon: "upload_file" },
         { path: "/analytics", label: "Analítica", icon: "bar_chart" },
     ];
 
@@ -69,12 +68,20 @@ const Sidebar: React.FC = () => {
                     </Link>
                 ))}
 
-                {/* System Section */}
+                {/* System Section - Solo visible para admins */}
                 <div className="pt-4 mt-4 border-t border-slate-200 dark:border-slate-800">
                     <p className="px-3 text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
                         Sistema
                     </p>
-                    {systemItems.map((item) => (
+                    {systemItems
+                        .filter(item => {
+                            // Configuración solo para admins
+                            if (item.path === '/settings') {
+                                return user?.role === 'admin';
+                            }
+                            return true;
+                        })
+                        .map((item) => (
                         <Link
                             key={item.path}
                             href={item.path}

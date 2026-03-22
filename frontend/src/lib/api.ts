@@ -10,28 +10,39 @@ export const api = axios.create({
 });
 
 // Types
+export interface ScoringDimension {
+    dimension: string;
+    weight: number;
+    description?: string;
+}
+
 export interface Candidate {
     id: string;
     full_name: string;
     email?: string;
+    phone?: string;
+    linkedin?: string;
     summary?: string;
     skills: string[];
     total_experience_years: number;
     status: string;
+    job_id?: string;
 }
 
 export interface CandidateDetail extends Candidate {
     experience: Array<{
         company: string;
         title: string;
-        start_date?: string;
-        end_date?: string;
+        start_date?: string | null;
+        end_date?: string | null;
+        is_current?: boolean;
         description?: string;
     }>;
     education: Array<{
         institution: string;
         degree: string;
         field_of_study?: string;
+        education_type?: string; // "educacion" | "certificacion"
     }>;
     raw_text?: string;
 }
@@ -41,11 +52,19 @@ export interface JobProfile {
     title: string;
     department?: string;
     description?: string;
+    seniority_level?: string;
+    work_modality?: string;
+    industry?: string;
+    location?: string;
     required_skills: string[];
     preferred_skills: string[];
+    responsibilities?: string[];
+    key_objectives?: string[];
     min_experience_years: number;
     education_level?: string;
     status: string;
+    scoring_config?: ScoringDimension[];
+    candidate_count?: number;
 }
 
 export interface MatchResult {
@@ -55,7 +74,9 @@ export interface MatchResult {
     experience_score: number;
     education_score: number;
     skills_score: number;
+    dimension_scores?: Record<string, number>;
     explanation: string;
+    recommendation: string; // "Altamente recomendado" | "Buena opción" | "Considerar" | "No recomendado"
     missing_skills: string[];
     bonus_skills: string[];
 }
@@ -75,55 +96,73 @@ export interface UploadResponse {
     extracted_name: string | null;
     skills_count: number;
     message: string;
+    job_id?: string;
 }
 
 // API Functions
 export const candidatesApi = {
-    list: (page = 1, pageSize = 20) =>
+    list: (page = 1, pageSize = 20, jobId?: string) =>
         api.get<{ items: Candidate[]; total: number }>("/candidates", {
-            params: { page, page_size: pageSize },
+            params: { page, page_size: pageSize, ...(jobId ? { job_id: jobId } : {}) },
         }),
 
     get: (id: string) => api.get<CandidateDetail>(`/candidates/${id}`),
 
-    upload: (file: File) => {
+    upload: (file: File, jobId?: string) => {
         const formData = new FormData();
         formData.append("file", file);
+        if (jobId) formData.append("job_id", jobId);
         return api.post<UploadResponse>("/candidates/upload", formData, {
             headers: { "Content-Type": "multipart/form-data" },
+            timeout: 120000, // 2 minutes per file — LLM extraction is slow on CPU
         });
     },
 
     uploadMultiple: async (
         files: File[],
-        onProgress?: (current: number, total: number, filename: string) => void
+        jobId?: string,
+        onProgress?: (current: number, total: number, filename: string) => void,
+        concurrency = 2, // process 2 CVs in parallel; Ollama queues internally
     ): Promise<UploadResponse[]> => {
-        const results: UploadResponse[] = [];
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            if (onProgress) onProgress(i, files.length, file.name);
-            try {
-                const response = await candidatesApi.upload(file);
-                results.push(response.data);
-            } catch (error: any) {
-                results.push({
-                    id: "",
-                    filename: file.name,
-                    status: "error",
-                    extracted_name: null,
-                    skills_count: 0,
-                    message: error.response?.data?.detail || "Error al procesar",
-                });
-            }
+        const results: UploadResponse[] = new Array(files.length);
+        let completed = 0;
+
+        // Process files in parallel batches of `concurrency`
+        for (let i = 0; i < files.length; i += concurrency) {
+            const batch = files.slice(i, i + concurrency);
+            const batchPromises = batch.map(async (file, batchIdx) => {
+                const globalIdx = i + batchIdx;
+                if (onProgress) onProgress(completed, files.length, file.name);
+                try {
+                    const response = await candidatesApi.upload(file, jobId);
+                    results[globalIdx] = response.data;
+                } catch (error: any) {
+                    results[globalIdx] = {
+                        id: "",
+                        filename: file.name,
+                        status: "error",
+                        extracted_name: null,
+                        skills_count: 0,
+                        message: error.response?.data?.detail || "Error al procesar",
+                    };
+                } finally {
+                    completed++;
+                    if (onProgress) onProgress(completed, files.length, file.name);
+                }
+            });
+            await Promise.all(batchPromises);
         }
-        if (onProgress) onProgress(files.length, files.length, "Completado");
+
         return results;
     },
 
     delete: (id: string) => api.delete(`/candidates/${id}`),
 
     updateStatus: (id: string, status: string) =>
-        api.patch(`/candidates/${id}/status`, null, { params: { new_status: status } }),
+        api.patch(`/candidates/${id}/status`, { status }),
+
+    getFile: (id: string, endpoint: "preview" | "download") =>
+        api.get(`/candidates/${id}/${endpoint}`, { responseType: "arraybuffer" }),
 };
 
 export const jobsApi = {
@@ -131,11 +170,16 @@ export const jobsApi = {
 
     get: (id: string) => api.get<JobProfile>(`/jobs/${id}`),
 
-    create: (data: Partial<JobProfile>) => api.post<JobProfile>("/jobs", data),
+    create: (data: Partial<JobProfile> & { scoring_config?: ScoringDimension[] }) =>
+        api.post<JobProfile>("/jobs", data),
 
-    update: (id: string, data: Partial<JobProfile>) => api.put<JobProfile>(`/jobs/${id}`, data),
+    update: (id: string, data: Partial<JobProfile> & { scoring_config?: ScoringDimension[] }) =>
+        api.put<JobProfile>(`/jobs/${id}`, data),
 
     delete: (id: string) => api.delete(`/jobs/${id}`),
+
+    updateStatus: (id: string, newStatus: string) =>
+        api.patch(`/jobs/${id}/status?new_status=${encodeURIComponent(newStatus)}`),
 
     analyze: (file?: File, text?: string) => {
         const formData = new FormData();
@@ -145,6 +189,9 @@ export const jobsApi = {
             headers: { "Content-Type": "multipart/form-data" },
         });
     },
+
+    getScoringPresets: () =>
+        api.get<{ default: ScoringDimension[] }>("/jobs/scoring-presets"),
 };
 
 export const searchApi = {
@@ -235,7 +282,7 @@ export const notesApi = {
         api.patch(`/candidates/${candidateId}/rating?rating=${rating}`),
 
     updateStatus: (candidateId: string, status: string, reason?: string) =>
-        api.patch(`/candidates/${candidateId}/status?status=${status}${reason ? `&reason=${encodeURIComponent(reason)}` : ""}`),
+        api.patch(`/candidates/${candidateId}/status`, { status }),
 };
 
 // Interview Questions types

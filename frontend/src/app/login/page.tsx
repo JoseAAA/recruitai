@@ -115,21 +115,33 @@ export default function LoginPage() {
                         </button>
                     </div>
 
-                    {/* Register Link */}
-                    <p className="text-center text-slate-400 text-sm">
-                        ¿No tienes cuenta?{" "}
-                        <Link href="/register" className="text-[#135bec] hover:underline">
-                            Regístrate aquí
-                        </Link>
+                    {/* IT Contact Info - No public registration */}
+                    <p className="text-center text-slate-500 text-sm">
+                        ¿Necesitas acceso? Contacta a TI
                     </p>
 
                     {/* Demo Credentials */}
-                    <div className="mt-6 p-4 rounded-lg bg-slate-800/50 border border-slate-700">
-                        <p className="text-xs text-slate-400 text-center mb-2">Credenciales de demostración:</p>
-                        <div className="flex justify-center gap-4 text-xs">
-                            <span className="text-slate-300">admin@recruitai.com</span>
-                            <span className="text-slate-500">|</span>
-                            <span className="text-slate-300">admin123</span>
+                    <div className="mt-6 p-4 rounded-lg bg-slate-800/50 border border-slate-700 space-y-3">
+                        <p className="text-xs text-slate-400 text-center mb-2">Cuentas de demostración:</p>
+
+                        {/* Admin Account */}
+                        <div className="p-2 rounded bg-slate-800 border border-emerald-500/30">
+                            <p className="text-xs text-emerald-400 font-medium mb-1">👤 Administrador (TI)</p>
+                            <div className="flex justify-between text-xs">
+                                <span className="text-slate-300">admin@recruitai.com</span>
+                                <span className="text-slate-400">admin123</span>
+                            </div>
+                            <p className="text-[10px] text-slate-500 mt-1">Acceso completo + Configuración API</p>
+                        </div>
+
+                        {/* HR Account */}
+                        <div className="p-2 rounded bg-slate-800 border border-blue-500/30">
+                            <p className="text-xs text-blue-400 font-medium mb-1">👤 Recursos Humanos</p>
+                            <div className="flex justify-between text-xs">
+                                <span className="text-slate-300">rrhh@recruitai.com</span>
+                                <span className="text-slate-400">rrhh123</span>
+                            </div>
+                            <p className="text-[10px] text-slate-500 mt-1">Solo herramientas de reclutamiento</p>
                         </div>
                     </div>
                 </form>

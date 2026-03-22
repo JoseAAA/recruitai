@@ -20,7 +20,7 @@ const Header: React.FC = () => {
                         type="text"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Buscar candidatos, empleos o etiquetas..."
+                        placeholder="Buscar perfiles de puesto..."
                         className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                     />
                 </div>
@@ -43,23 +43,11 @@ const Header: React.FC = () => {
                         ></span>
                     </span>
                     <span className="text-[10px] uppercase font-bold text-slate-500 dark:text-slate-400">
-                        {config.type === "ollama" ? "Ollama" : config.type === "openai" ? "OpenAI" : "Gemini"}
+                        Ollama Local
                     </span>
                 </div>
 
-                {/* Notifications */}
-                <button className="relative p-2 text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors">
-                    <span className="material-symbols-outlined">notifications</span>
-                    <span className="absolute top-1.5 right-1.5 size-2 bg-rose-500 rounded-full border-2 border-white dark:border-[#0f172a]"></span>
-                </button>
-
-                {/* Messages */}
-                <button className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors">
-                    <span className="material-symbols-outlined">chat</span>
-                </button>
-
-                {/* Divider */}
-                <div className="h-6 w-px bg-slate-200 dark:bg-slate-700 mx-1"></div>
+                {/* Note: Notifications and Chat icons removed - not functional */}
 
                 {/* New Vacancy Button */}
                 <Link

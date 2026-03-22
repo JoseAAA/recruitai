@@ -1,10 +1,13 @@
+import { Suspense } from "react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import DataIngestion from "@/components/data/DataIngestion";
 
 export default function DataIngestionPage() {
     return (
         <DashboardLayout>
-            <DataIngestion />
+            <Suspense>
+                <DataIngestion />
+            </Suspense>
         </DashboardLayout>
     );
 }
