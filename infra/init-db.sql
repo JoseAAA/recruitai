@@ -153,13 +153,33 @@ CREATE INDEX IF NOT EXISTS idx_cloud_connections_provider ON cloud_connections(u
 CREATE TRIGGER update_cloud_connections_updated_at BEFORE UPDATE ON cloud_connections
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
--- Migration: Add job_id to candidates (nullable for backwards compat)
+-- Migration: Add job_id to candidates (nullable, CASCADE so deleting a job removes its CVs)
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_name='candidates' AND column_name='job_id') THEN
-        ALTER TABLE candidates ADD COLUMN job_id UUID REFERENCES job_profiles(id) ON DELETE SET NULL;
+        ALTER TABLE candidates ADD COLUMN job_id UUID REFERENCES job_profiles(id) ON DELETE CASCADE;
         CREATE INDEX idx_candidates_job_id ON candidates(job_id);
+    END IF;
+END $$;
+
+-- Migration: Fix job_id FK from SET NULL → CASCADE on existing databases
+DO $$
+DECLARE
+    constraint_name TEXT;
+BEGIN
+    SELECT tc.constraint_name INTO constraint_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.referential_constraints rc ON tc.constraint_name = rc.constraint_name
+    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+    WHERE tc.table_name = 'candidates'
+      AND kcu.column_name = 'job_id'
+      AND rc.delete_rule = 'SET NULL';
+
+    IF constraint_name IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE candidates DROP CONSTRAINT ' || quote_ident(constraint_name);
+        ALTER TABLE candidates ADD CONSTRAINT candidates_job_id_fkey
+            FOREIGN KEY (job_id) REFERENCES job_profiles(id) ON DELETE CASCADE;
     END IF;
 END $$;
 
@@ -229,3 +249,22 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id);
+
+-- System settings table (non-sensitive config: provider selection, model names, etc.)
+CREATE TABLE IF NOT EXISTS system_settings (
+    key VARCHAR(100) PRIMARY KEY,
+    value TEXT NOT NULL,
+    description VARCHAR(255),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Migration: Add recommendation, candidate_name, scored_at to match_results
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='match_results' AND column_name='recommendation') THEN
+        ALTER TABLE match_results ADD COLUMN recommendation VARCHAR(50);
+        ALTER TABLE match_results ADD COLUMN candidate_name VARCHAR(255);
+        ALTER TABLE match_results ADD COLUMN scored_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+    END IF;
+END $$;

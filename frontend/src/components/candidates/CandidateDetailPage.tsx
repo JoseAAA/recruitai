@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { candidatesApi, notesApi, jobsApi, interviewApi, CandidateDetail as CandidateDetailType, CandidateNote, JobProfile, InterviewQuestionsResponse } from "@/lib/api";
+import { candidatesApi, notesApi, CandidateDetail as CandidateDetailType, CandidateNote } from "@/lib/api";
 
 const CandidateDetailPage: React.FC = () => {
     const params = useParams();
@@ -25,11 +25,6 @@ const CandidateDetailPage: React.FC = () => {
     const [statusReason, setStatusReason] = useState("");
     const [selectedStatus, setSelectedStatus] = useState("");
 
-    // Interview Questions
-    const [jobs, setJobs] = useState<JobProfile[]>([]);
-    const [selectedJobId, setSelectedJobId] = useState<string>("");
-    const [interviewQuestions, setInterviewQuestions] = useState<InterviewQuestionsResponse | null>(null);
-    const [generatingQuestions, setGeneratingQuestions] = useState(false);
 
     // Delete confirmation
     const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -44,15 +39,13 @@ const CandidateDetailPage: React.FC = () => {
 
             try {
                 setLoading(true);
-                const [candidateRes, notesRes, jobsRes] = await Promise.all([
+                const [candidateRes, notesRes] = await Promise.all([
                     candidatesApi.get(candidateId),
                     notesApi.list(candidateId).catch(() => ({ data: { items: [] } })),
-                    jobsApi.list().catch(() => ({ data: { items: [] } }))
                 ]);
                 setCandidate(candidateRes.data);
                 setNotes(notesRes.data.items || []);
                 setRating((candidateRes.data as any).rating || 0);
-                setJobs(jobsRes.data.items?.filter(j => j.status === "active") || []);
             } catch (err: any) {
                 console.error("Failed to fetch candidate:", err);
                 setError("No se pudo cargar el candidato");
@@ -108,20 +101,6 @@ const CandidateDetailPage: React.FC = () => {
             setStatusReason("");
         } catch (err) {
             console.error("Failed to update status:", err);
-        }
-    };
-
-    const handleGenerateQuestions = async () => {
-        if (!selectedJobId) return;
-
-        try {
-            setGeneratingQuestions(true);
-            const response = await interviewApi.getQuestions(candidateId, selectedJobId);
-            setInterviewQuestions(response.data);
-        } catch (err) {
-            console.error("Failed to generate questions:", err);
-        } finally {
-            setGeneratingQuestions(false);
         }
     };
 
@@ -521,162 +500,6 @@ const CandidateDetailPage: React.FC = () => {
                             <div className="text-center py-8 text-slate-500">
                                 <span className="material-symbols-outlined text-[32px] block mb-2">notes</span>
                                 <p className="text-sm">No hay notas aún</p>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Interview Questions Generator */}
-                    <div className="bg-gradient-to-br from-purple-500/5 to-blue-500/5 border border-purple-500/20 rounded-xl p-5 shadow-sm">
-                        <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
-                            <span className="material-symbols-outlined text-purple-500">psychology</span>
-                            Generador de Preguntas de Entrevista
-                            <span className="px-2 py-0.5 text-xs rounded-full bg-purple-500/20 text-purple-500 font-medium ml-2">IA</span>
-                        </h3>
-
-                        {/* Job Selector */}
-                        <div className="flex flex-col sm:flex-row gap-3 mb-4">
-                            <select
-                                value={selectedJobId}
-                                onChange={(e) => { setSelectedJobId(e.target.value); setInterviewQuestions(null); }}
-                                className="flex-1 px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm"
-                            >
-                                <option value="">Selecciona una vacante...</option>
-                                {jobs.map(job => (
-                                    <option key={job.id} value={job.id}>{job.title}</option>
-                                ))}
-                            </select>
-                            <button
-                                onClick={handleGenerateQuestions}
-                                disabled={!selectedJobId || generatingQuestions}
-                                className="px-4 py-2 bg-purple-500 text-white font-medium rounded-lg hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
-                            >
-                                {generatingQuestions ? (
-                                    <>
-                                        <span className="material-symbols-outlined animate-spin text-[18px]">sync</span>
-                                        Generando...
-                                    </>
-                                ) : (
-                                    <>
-                                        <span className="material-symbols-outlined text-[18px]">auto_awesome</span>
-                                        Generar Preguntas
-                                    </>
-                                )}
-                            </button>
-                        </div>
-
-                        {jobs.length === 0 && (
-                            <div className="text-center py-6 text-slate-500">
-                                <span className="material-symbols-outlined text-[32px] block mb-2">work_off</span>
-                                <p className="text-sm">No hay vacantes activas</p>
-                                <Link href="/jobs" className="text-purple-500 hover:underline text-sm">Crear una vacante</Link>
-                            </div>
-                        )}
-
-                        {/* Generated Questions */}
-                        {interviewQuestions && (
-                            <div className="space-y-4 mt-4">
-                                {/* Skill Analysis */}
-                                <div className="flex flex-wrap gap-4 p-4 bg-white dark:bg-slate-800/50 rounded-lg">
-                                    <div>
-                                        <p className="text-xs text-slate-500 mb-2">✅ Habilidades que coinciden</p>
-                                        <div className="flex flex-wrap gap-1">
-                                            {interviewQuestions.matching_skills.length > 0 ? (
-                                                interviewQuestions.matching_skills.map((skill, i) => (
-                                                    <span key={i} className="px-2 py-0.5 bg-emerald-500/20 text-emerald-600 rounded text-xs">{skill}</span>
-                                                ))
-                                            ) : (
-                                                <span className="text-xs text-slate-400">Ninguna</span>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <p className="text-xs text-slate-500 mb-2">⚠️ Habilidades faltantes (gaps)</p>
-                                        <div className="flex flex-wrap gap-1">
-                                            {interviewQuestions.skill_gaps.length > 0 ? (
-                                                interviewQuestions.skill_gaps.map((skill, i) => (
-                                                    <span key={i} className="px-2 py-0.5 bg-amber-500/20 text-amber-600 rounded text-xs">{skill}</span>
-                                                ))
-                                            ) : (
-                                                <span className="text-xs text-slate-400">Ninguna</span>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {/* Technical Questions */}
-                                {interviewQuestions.questions.technical_questions?.length > 0 && (
-                                    <div>
-                                        <h4 className="font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-2">
-                                            <span className="material-symbols-outlined text-blue-500 text-[18px]">code</span>
-                                            Preguntas Técnicas
-                                        </h4>
-                                        <ul className="space-y-2">
-                                            {interviewQuestions.questions.technical_questions.map((q, i) => (
-                                                <li key={i} className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-sm text-slate-700 dark:text-slate-300">
-                                                    {i + 1}. {q}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                )}
-
-                                {/* Gap Questions */}
-                                {interviewQuestions.questions.gap_questions?.length > 0 && (
-                                    <div>
-                                        <h4 className="font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-2">
-                                            <span className="material-symbols-outlined text-amber-500 text-[18px]">psychology_alt</span>
-                                            Preguntas sobre Gaps
-                                        </h4>
-                                        <ul className="space-y-2">
-                                            {interviewQuestions.questions.gap_questions.map((q, i) => (
-                                                <li key={i} className="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg text-sm text-slate-700 dark:text-slate-300">
-                                                    {i + 1}. {q}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                )}
-
-                                {/* Behavioral Questions */}
-                                {interviewQuestions.questions.behavioral_questions?.length > 0 && (
-                                    <div>
-                                        <h4 className="font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-2">
-                                            <span className="material-symbols-outlined text-purple-500 text-[18px]">groups</span>
-                                            Preguntas de Comportamiento
-                                        </h4>
-                                        <ul className="space-y-2">
-                                            {interviewQuestions.questions.behavioral_questions.map((q, i) => (
-                                                <li key={i} className="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-sm text-slate-700 dark:text-slate-300">
-                                                    {i + 1}. {q}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                )}
-
-                                {/* Situational Questions */}
-                                {interviewQuestions.questions.situational_questions?.length > 0 && (
-                                    <div>
-                                        <h4 className="font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-2">
-                                            <span className="material-symbols-outlined text-emerald-500 text-[18px]">lightbulb</span>
-                                            Preguntas Situacionales
-                                        </h4>
-                                        <ul className="space-y-2">
-                                            {interviewQuestions.questions.situational_questions.map((q, i) => (
-                                                <li key={i} className="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg text-sm text-slate-700 dark:text-slate-300">
-                                                    {i + 1}. {q}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                )}
-
-                                {/* AI Badge */}
-                                <div className="text-right">
-                                    <span className="text-xs text-slate-400">
-                                        {interviewQuestions.generated_by_ai ? "🤖 Generado por IA" : "📋 Preguntas predeterminadas"}
-                                    </span>
-                                </div>
                             </div>
                         )}
                     </div>

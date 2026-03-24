@@ -79,6 +79,7 @@ export interface MatchResult {
     recommendation: string; // "Altamente recomendado" | "Buena opción" | "Considerar" | "No recomendado"
     missing_skills: string[];
     bonus_skills: string[];
+    scored_at?: string;
 }
 
 export interface SearchResult {
@@ -192,6 +193,9 @@ export const jobsApi = {
 
     getScoringPresets: () =>
         api.get<{ default: ScoringDimension[] }>("/jobs/scoring-presets"),
+
+    getScores: (jobId: string) =>
+        api.get<{ scores: MatchResult[]; total: number; job_id: string }>(`/jobs/${jobId}/scores`),
 };
 
 export const searchApi = {
@@ -283,26 +287,6 @@ export const notesApi = {
 
     updateStatus: (candidateId: string, status: string, reason?: string) =>
         api.patch(`/candidates/${candidateId}/status`, { status }),
-};
-
-// Interview Questions types
-export interface InterviewQuestionsResponse {
-    candidate_name: string;
-    job_title: string;
-    skill_gaps: string[];
-    matching_skills: string[];
-    questions: {
-        technical_questions: string[];
-        gap_questions: string[];
-        behavioral_questions: string[];
-        situational_questions: string[];
-    };
-    generated_by_ai: boolean;
-}
-
-export const interviewApi = {
-    getQuestions: (candidateId: string, jobId: string) =>
-        api.get<InterviewQuestionsResponse>(`/candidates/${candidateId}/interview-questions?job_id=${jobId}`),
 };
 
 // Cloud Sync types

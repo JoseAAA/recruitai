@@ -10,6 +10,8 @@ services:
       - qdrant_data:/qdrant/storage
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=2   # Limita threads de búsqueda
+      - QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS=1
     networks:
       - recruitai-network
     restart: unless-stopped
@@ -45,9 +47,9 @@ services:
       - ollama_data:/root/.ollama
     environment:
       - OLLAMA_FLASH_ATTENTION=1        # 20-40% faster attention on GPU
-      - OLLAMA_KEEP_ALIVE=60m           # Keep model in VRAM 60 min (avoid cold-start per upload session)
-      - OLLAMA_NUM_PARALLEL=2           # Allow 2 concurrent requests (extraction + embedding overlap)
-      - OLLAMA_MAX_LOADED_MODELS=2      # Keep both gemma3:4b and nomic-embed-text in VRAM
+      - OLLAMA_KEEP_ALIVE=10m           # Descarga el modelo tras 10 min sin uso (libera ~1.6GB RAM)
+      - OLLAMA_NUM_PARALLEL=1           # 1 request simultáneo (suficiente para uso individual)
+      - OLLAMA_MAX_LOADED_MODELS=2      # gemma3:4b + nomic-embed-text
     networks:
       - recruitai-network
     deploy:

@@ -17,7 +17,10 @@ from typing import Optional, Type, TypeVar, Dict, Tuple
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.domain.models import ExtractedJobProfile, ExtractedResume, ExperienceEntry, EducationEntry
+from app.domain.models import (
+    ExtractedJobProfile, ExtractedResume, ExperienceEntry, EducationEntry,
+    ExperienciaProfesional, EducacionProfesional, DatosPersonales,
+)
 from app.adapters.llm_providers import get_provider, LLMProvider
 from app.adapters.pii_masker import get_pii_masker, PIIMasker
 
@@ -430,17 +433,46 @@ class LLMEngine:
         # Dedupe and limit education
         unique_education = education_entries[:3]  # Max 3 entries
         
-        # Create summary from first 500 chars
-        summary = text[:500].replace('\n', ' ').strip()
-        
+        # Build ExperienciaProfesional entries from detected experience
+        exp_profesional = []
+        for exp in unique_experience:
+            fecha_inicio = exp.start_date.strftime("%Y-%m") if exp.start_date else None
+            if exp.is_current:
+                fecha_fin = "Presente"
+            elif exp.end_date:
+                fecha_fin = exp.end_date.strftime("%Y-%m")
+            else:
+                fecha_fin = None
+            exp_profesional.append(ExperienciaProfesional(
+                cargo=exp.title,
+                empresa=exp.company,
+                periodo="",
+                fecha_inicio=fecha_inicio,
+                fecha_fin=fecha_fin,
+                es_trabajo_actual=exp.is_current,
+                resumen_logros=[]
+            ))
+
+        # Build EducacionProfesional entries from detected education
+        edu_profesional = []
+        for edu in unique_education:
+            edu_profesional.append(EducacionProfesional(
+                institucion=edu.institution,
+                titulo=edu.degree,
+                anio_egreso=str(edu.end_date.year) if edu.end_date else None,
+                tipo="educacion"
+            ))
+
         return ExtractedResume(
-            full_name=full_name,
-            email=email,
-            phone=phone,
-            summary=summary,
-            skills=list(set(found_skills)),
-            experience=unique_experience,
-            education=unique_education
+            datos_personales=DatosPersonales(
+                nombre_completo=full_name,
+                telefono=phone,
+                email=email,
+                linkedin=None,
+            ),
+            habilidades=list(set(found_skills)),
+            experiencia_profesional=exp_profesional,
+            educacion=edu_profesional,
         )
     
     async def extract_structured(
@@ -588,22 +620,32 @@ TEXTO DEL CV A ANALIZAR:
 
 REGLAS ESTRICTAS:
 1. Devuelve SOLO el JSON, sin texto adicional, sin markdown, sin ```json.
-2. Si un dato no aparece, usa null. NUNCA uses "N/A", "No especificado" ni texto vacío.
-3. El texto puede venir de OCR con formato irregular — interpreta el CONTENIDO, no el formato.
-4. Busca el email aunque esté separado por espacios o saltos de línea.
-5. Busca el teléfono incluyendo prefijos internacionales (+34, +51, +52, etc.).
+2. Si un dato opcional no aparece, usa null. EXCEPCIONES: los campos "cargo", "empresa", "titulo", "institucion" NUNCA deben ser null — usa cadena vacía "" si no están disponibles. NUNCA uses "N/A", "No especificado".
+3. El texto fue extraído de un PDF por bloques ordenados por posición. En CVs con diseño de columnas, los datos de distintas secciones aparecen INTERCALADOS en el texto (ej: una fila puede contener empresa de experiencia + institución de educación mezcladas). Usa los encabezados de sección (EXPERIENCIA, EDUCACIÓN, HABILIDADES, IDIOMAS, etc.) para clasificar correctamente cada dato aunque aparezcan fuera de orden.
+4. El nombre del candidato suele estar en las primeras líneas del texto, posiblemente dividido en múltiples líneas (nombre de pila en una línea, apellido(s) en la siguiente). Identifica y concatena las líneas iniciales que formen el nombre completo.
+5. Busca el email aunque esté separado por espacios o saltos de línea.
+6. Busca el teléfono incluyendo prefijos internacionales (+34, +51, +52, etc.).
+
+REGLAS DE NORMALIZACIÓN (MUY IMPORTANTE):
+7. "nombre_completo": SIEMPRE en formato Título (Title Case). Ej: "JOSE ALARCON ARONE" → "Jose Alarcon Arone". NUNCA todo en mayúsculas.
+8. "cargo": Título de puesto en formato Título. Ej: "ANALISTA DE DATOS SENIOR" → "Analista de Datos Senior".
+9. "empresa": Nombre de empresa en formato Título. Ej: "CAMPOSOL" → "Camposol" si es una palabra. Siglas conocidas (IBM, SAP, AWS) se mantienen en mayúsculas.
+10. "institucion" (educación): Escribe el NOMBRE COMPLETO de la institución. Ej: "UNMSM" → "Universidad Nacional Mayor de San Marcos", "UNI" → "Universidad Nacional de Ingeniería", "PUCP" → "Pontificia Universidad Católica del Perú", "UPC" → "Universidad Peruana de Ciencias Aplicadas", "UTP" → "Universidad Tecnológica del Perú".
+11. "linkedin": URL limpia sin espacios. Si el URL está en dos líneas, únelas. Ej: "linkedin.com/in/jose- alarcon" → "linkedin.com/in/jose-alarcon". Elimina cualquier espacio en el URL.
 
 REGLAS PARA EXPERIENCIA PROFESIONAL:
-6. "periodo": texto legible del período, SIEMPRE que haya fechas (ej: "Enero 2021 - Mayo 2024"). Si no hay fechas, usa null.
-7. "fecha_inicio": formato "YYYY-MM" (ej: "2021-01"). OBLIGATORIO si hay año/mes visible. Si solo hay año, usa "YYYY-01".
-8. "fecha_fin": formato "YYYY-MM" o "Presente". Si dice "Presente", "Actual", "Actualidad", "Current" → pon "Presente".
-9. "es_trabajo_actual": true SOLO si fecha_fin es "Presente" o el cargo sigue activo.
-10. "resumen_logros": lista de logros/responsabilidades. Si no hay, usa lista vacía [].
+12. "periodo": texto legible del período, SIEMPRE que haya fechas (ej: "Enero 2021 - Mayo 2024"). Si no hay fechas, usa null.
+13. "fecha_inicio": formato "YYYY-MM" (ej: "2021-01"). OBLIGATORIO si hay año/mes visible. Si solo hay año, usa "YYYY-01".
+14. "fecha_fin": formato "YYYY-MM" o exactamente la cadena "Presente". Cualquier variante que indique que el trabajo sigue activo ("Presente", "Actual", "Actualidad", "Current", "A la fecha", "Hasta hoy", "Hasta la fecha", "En curso", "–", "Hoy", o campo vacío) → escribe SIEMPRE "Presente". NUNCA uses null cuando el trabajo sigue activo.
+15. "es_trabajo_actual": true SOLO si fecha_fin es "Presente" o el cargo sigue activo.
+16. "resumen_logros": lista de logros/responsabilidades. Cada ítem debe comenzar con verbo en pasado o infinitivo (ej: "Implementé...", "Lideré...", "Desarrollé..."). Si no hay, usa lista vacía [].
 
 REGLAS PARA EDUCACIÓN (campo "tipo" es OBLIGATORIO):
-11. tipo = "educacion" → universidad, facultad, instituto técnico, bachillerato, maestría, máster, doctorado, MBA, licenciatura, ingeniería, tecnología.
-12. tipo = "certificacion" → bootcamp, curso online, certificado, diplomado, especialización, taller, Coursera, Udemy, Platzi, LinkedIn Learning, Google, AWS, Microsoft, Oracle, Scrum, PMP.
-13. "anio_egreso": año de graduación/finalización como string (ej: "2020"). Si no aparece, usa null.
+17. tipo = "educacion" → SOLO títulos académicos formales de grado o posgrado: Bachiller, Licenciatura, Ingeniería, Técnico Superior Universitario, Maestría/Máster, Doctorado, MBA. Si tienes dudas, usa "certificacion".
+18. tipo = "certificacion" → TODO lo demás: bootcamp, curso online, diplomado, especialización, taller, certificado profesional, cualquier plataforma (Coursera, Udemy, Platzi, LinkedIn Learning), certificaciones de empresa (Google, AWS, Microsoft, Oracle, Cisco, Scrum, PMP). También aplica a cursos cortos de instituciones presenciales.
+19. Para tipo="certificacion": "titulo" = NOMBRE del curso o certificado (ej: "Data Science", "Power BI Integral", "Bootcamp de MLOps"); "institucion" = PLATAFORMA o ENTIDAD que lo emitió (ej: "Coursera", "ADDC Perú", "Código Facilito"). NUNCA pongas el nombre de la plataforma como titulo. NUNCA uses palabras genéricas como titulo: "Certificación", "Certificaciones", "Educación", "Formación", "Diploma", "Título", "Curso" — si no puedes identificar el nombre exacto del curso, omite esa entrada del JSON.
+20. "anio_egreso": año de graduación/finalización como string (ej: "2020"). Si no aparece, usa null.
+21. En CVs con educación en formato tabla o columnas, si ves grupos de nombres de programas seguidos de listas de institución+año, empareja cada programa con su institución en el mismo orden de aparición.
 
 EJEMPLO DE RESPUESTA:
 {{
@@ -636,9 +678,9 @@ EJEMPLO DE RESPUESTA:
   ],
   "educacion": [
     {{
-      "institucion": "Universidad Nacional",
-      "titulo": "Ingeniería en Sistemas Informáticos",
-      "anio_egreso": "2017",
+      "institucion": "Universidad Nacional Mayor de San Marcos",
+      "titulo": "Bachiller en Estadística",
+      "anio_egreso": "2021",
       "tipo": "educacion"
     }},
     {{
@@ -648,15 +690,21 @@ EJEMPLO DE RESPUESTA:
       "tipo": "educacion"
     }},
     {{
-      "institucion": "Coursera / Google",
-      "titulo": "Google Data Analytics Certificate",
-      "anio_egreso": "2023",
+      "institucion": "Coursera",
+      "titulo": "Data Science",
+      "anio_egreso": "2020",
       "tipo": "certificacion"
     }},
     {{
-      "institucion": "Platzi",
-      "titulo": "Bootcamp Ciencia de Datos",
+      "institucion": "ADDC Perú",
+      "titulo": "Power BI Integral",
       "anio_egreso": "2022",
+      "tipo": "certificacion"
+    }},
+    {{
+      "institucion": "Código Facilito",
+      "titulo": "Bootcamp de MLOps",
+      "anio_egreso": "2024",
       "tipo": "certificacion"
     }}
   ]
@@ -692,16 +740,116 @@ TEXTO DEL CV A ANALIZAR:
             
             try:
                 parsed = json.loads(raw_output)
-                return ExtractedResume.model_validate(parsed)
+                resume = ExtractedResume.model_validate(parsed)
+                return self._normalize_extracted_resume(resume)
             except json.JSONDecodeError:
                 json_match = re.search(r'\{.*\}', raw_output, re.DOTALL)
                 if json_match:
                     parsed = json.loads(json_match.group())
-                    return ExtractedResume.model_validate(parsed)
+                    resume = ExtractedResume.model_validate(parsed)
+                    return self._normalize_extracted_resume(resume)
                 raise ValueError(f"Could not parse LLM response as JSON: {raw_output[:200]}")
         except Exception as e:
             logger.error(f"LLM resume extraction failed: {e}, falling back to simple extraction")
             return self._extract_resume_simple(sanitized_text, filename=filename)
+
+    def _normalize_extracted_resume(self, resume: "ExtractedResume") -> "ExtractedResume":
+        """Post-process LLM output: normalize casing, clean LinkedIn URLs, etc."""
+        KNOWN_ABBREVS = {
+            "unmsm": "Universidad Nacional Mayor de San Marcos",
+            "uni": "Universidad Nacional de Ingeniería",
+            "pucp": "Pontificia Universidad Católica del Perú",
+            "upc": "Universidad Peruana de Ciencias Aplicadas",
+            "utp": "Universidad Tecnológica del Perú",
+            "udep": "Universidad de Piura",
+            "usil": "Universidad San Ignacio de Loyola",
+            "ulima": "Universidad de Lima",
+            "unfv": "Universidad Nacional Federico Villarreal",
+            "unac": "Universidad Nacional del Callao",
+            "upn": "Universidad Privada del Norte",
+            "ucsur": "Universidad Científica del Sur",
+            "usat": "Universidad Católica Santo Toribio de Mogrovejo",
+            "uct": "Universidad Católica de Trujillo",
+        }
+        # Acronyms that stay in uppercase
+        KEEP_UPPER = {"ibm", "sap", "aws", "gcp", "sql", "bi", "erp", "crm", "hr", "rrhh",
+                      "bcp", "bbva", "mba", "phd", "ceo", "cto", "cfo", "it", "ai", "ml",
+                      "etl", "kpi", "api", "io", "sa", "sac", "saa", "srl", "eirl"}
+
+        def to_title(s: str) -> str:
+            if not s:
+                return s
+            words = s.split()
+            result = []
+            for w in words:
+                lw = w.lower().rstrip(".,;")
+                if lw in KEEP_UPPER:
+                    result.append(w.upper())
+                else:
+                    result.append(w.capitalize())
+            return " ".join(result)
+
+        def clean_linkedin(url: str) -> str:
+            if not url:
+                return url
+            # Remove all spaces and newlines from URL
+            url = re.sub(r'\s+', '', url)
+            # Ensure https:// prefix
+            if url and not url.startswith("http"):
+                url = "https://" + url
+            return url
+
+        def normalize_institution(name: str) -> str:
+            if not name:
+                return name
+            key = name.strip().lower().rstrip(".")
+            if key in KNOWN_ABBREVS:
+                return KNOWN_ABBREVS[key]
+            return to_title(name)
+
+        dp = resume.datos_personales
+        if dp:
+            if dp.nombre_completo:
+                dp.nombre_completo = to_title(dp.nombre_completo)
+            if dp.linkedin:
+                dp.linkedin = clean_linkedin(dp.linkedin)
+
+        for exp in resume.experiencia_profesional or []:
+            if exp.cargo:
+                exp.cargo = to_title(exp.cargo)
+            if exp.empresa:
+                exp.empresa = to_title(exp.empresa)
+
+        # Section-label titles the LLM uses as a fallback when it can't read
+        # the actual certification/degree name (common with multi-column PDF tables).
+        # These are meaningless and must be dropped.
+        _GENERIC_TITLES = {
+            'certificación', 'certificacion', 'certificaciones',
+            'educación', 'educacion', 'formación', 'formacion',
+            'diploma', 'título', 'titulo', 'titulación', 'titulacion',
+            'grado', 'estudios', 'curso', 'cursos',
+        }
+
+        clean_edu = []
+        seen_titulos: set[str] = set()
+        for edu in resume.educacion or []:
+            if edu.institucion:
+                edu.institucion = normalize_institution(edu.institucion)
+            if edu.titulo:
+                edu.titulo = to_title(edu.titulo)
+            # Drop entries whose title is a generic section label
+            titulo_lower = edu.titulo.strip().lower()
+            if titulo_lower in _GENERIC_TITLES:
+                continue
+            # Drop duplicates (same título + tipo)
+            dedup_key = (titulo_lower, edu.tipo)
+            if dedup_key in seen_titulos:
+                continue
+            seen_titulos.add(dedup_key)
+            clean_edu.append(edu)
+        resume.educacion = clean_edu
+
+        return resume
     
     async def extract_job_profile(self, text: str) -> ExtractedJobProfile:
         """Extract structured job description data using an example-based prompt."""

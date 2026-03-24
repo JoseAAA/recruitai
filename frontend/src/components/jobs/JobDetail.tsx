@@ -30,130 +30,200 @@ function statusMeta(s: string) {
     return CANDIDATE_STATUS[s] ?? CANDIDATE_STATUS["new"];
 }
 
-// ── Match UI (reused from JobsList) ─────────────────────────────────────────
+// ── Recommendation config ────────────────────────────────────────────────────
 
-const RECOMMENDATION_META: Record<string, { label: string; color: string; bg: string; border: string; dot: string }> = {
-    "Altamente recomendado": { label: "Altamente recomendado", color: "text-emerald-700 dark:text-emerald-300", bg: "bg-emerald-50 dark:bg-emerald-900/30", border: "border-emerald-200 dark:border-emerald-700", dot: "bg-emerald-500" },
-    "Buena opción":          { label: "Buena opción",          color: "text-blue-700 dark:text-blue-300",       bg: "bg-blue-50 dark:bg-blue-900/30",       border: "border-blue-200 dark:border-blue-700",    dot: "bg-blue-500"   },
-    "Considerar":            { label: "Considerar",            color: "text-amber-700 dark:text-amber-300",     bg: "bg-amber-50 dark:bg-amber-900/30",     border: "border-amber-200 dark:border-amber-700",  dot: "bg-amber-500"  },
-    "No recomendado":        { label: "No recomendado",        color: "text-slate-500 dark:text-slate-400",     bg: "bg-slate-50 dark:bg-slate-800/50",     border: "border-slate-200 dark:border-slate-700",  dot: "bg-slate-400"  },
+const REC_DOT: Record<string, string> = {
+    "Altamente recomendado": "bg-emerald-500",
+    "Buena opción":          "bg-blue-500",
+    "Considerar":            "bg-amber-500",
+    "No recomendado":        "bg-slate-400",
 };
-function recMeta(r: string) { return RECOMMENDATION_META[r] ?? RECOMMENDATION_META["Considerar"]; }
 
-function ScoreBar({ label, value, color }: { label: string; value: number; color: string }) {
+const REC_TEXT: Record<string, string> = {
+    "Altamente recomendado": "text-emerald-600 dark:text-emerald-400",
+    "Buena opción":          "text-blue-600 dark:text-blue-400",
+    "Considerar":            "text-amber-600 dark:text-amber-400",
+    "No recomendado":        "text-slate-500 dark:text-slate-400",
+};
+
+// ── Ranking section ──────────────────────────────────────────────────────────
+
+type SortCol = "overall_score" | "skills_score" | "experience_score" | "education_score";
+
+const COL_LABELS: Record<SortCol, string> = {
+    overall_score:    "Total",
+    skills_score:     "Skills",
+    experience_score: "Exp.",
+    education_score:  "Edu.",
+};
+
+function ScoreCell({ value, highlight }: { value: number; highlight?: boolean }) {
+    const v = Math.round(value);
+    const color = v >= 75 ? "text-emerald-600 dark:text-emerald-400"
+        : v >= 55 ? "text-blue-600 dark:text-blue-400"
+        : v >= 35 ? "text-amber-600 dark:text-amber-400"
+        : "text-slate-400";
     return (
-        <div>
-            <div className="flex justify-between items-center mb-1">
-                <span className="text-xs text-slate-500 dark:text-slate-400">{label}</span>
-                <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{Math.round(value)}%</span>
-            </div>
-            <div className="h-2 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                <div className={`h-full ${color} rounded-full transition-all duration-700`} style={{ width: `${value}%` }} />
-            </div>
-        </div>
+        <span className={`font-black text-lg tabular-nums ${color} ${highlight ? "underline decoration-dotted underline-offset-2" : ""}`}>
+            {v}
+        </span>
     );
 }
 
-function CandidateMatchCard({ match, index }: { match: MatchResult; index: number }) {
-    const meta = recMeta(match.recommendation);
-    const score = Math.round(match.overall_score);
-    const initials = match.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase();
-    const scoreColor = score >= 75 ? "text-emerald-600" : score >= 55 ? "text-blue-600" : score >= 35 ? "text-amber-600" : "text-slate-500";
+function RankingSection({
+    scores,
+    loading,
+    candidateCount,
+    onRunMatch,
+}: {
+    scores: MatchResult[];
+    loading: boolean;
+    candidateCount: number;
+    onRunMatch: () => void;
+}) {
+    const [sortBy, setSortBy] = useState<SortCol>("overall_score");
+    const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
+
+    function toggleSort(col: SortCol) {
+        if (sortBy === col) setSortDir(d => d === "desc" ? "asc" : "desc");
+        else { setSortBy(col); setSortDir("desc"); }
+    }
+
+    const sorted = [...scores].sort((a, b) => {
+        const diff = (a[sortBy] ?? 0) - (b[sortBy] ?? 0);
+        return sortDir === "desc" ? -diff : diff;
+    });
+
+    // timestamp of most recent score
+    const lastRun = scores
+        .map(s => s.scored_at)
+        .filter(Boolean)
+        .sort()
+        .at(-1);
+
+    const lastRunLabel = lastRun
+        ? new Intl.DateTimeFormat("es-PE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(lastRun))
+        : null;
+
     return (
-        <div className={`rounded-xl border ${meta.border} ${meta.bg} p-5`}>
-            <div className="flex items-start gap-4">
-                <div className="flex flex-col items-center gap-1 flex-shrink-0">
-                    <span className="text-xs font-bold text-slate-400">#{index + 1}</span>
-                    <div className="w-11 h-11 rounded-full bg-gradient-to-br from-primary to-purple-500 flex items-center justify-center text-white text-sm font-bold shadow-sm">{initials}</div>
-                </div>
-                <div className="flex-1 min-w-0">
-                    <div className="flex items-start justify-between gap-2 flex-wrap">
-                        <div>
-                            <h4 className="font-bold text-slate-900 dark:text-white text-base leading-tight">{match.full_name}</h4>
-                            <span className={`inline-flex items-center gap-1.5 mt-1 text-xs font-semibold px-2 py-0.5 rounded-full ${meta.color} ${meta.bg} border ${meta.border}`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${meta.dot}`} />{meta.label}
-                            </span>
-                        </div>
-                        <div className="flex flex-col items-center flex-shrink-0">
-                            <span className={`text-3xl font-black ${scoreColor}`}>{score}</span>
-                            <span className="text-[10px] text-slate-400 uppercase tracking-wider">puntos</span>
-                        </div>
+        <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                    <span className="material-symbols-outlined text-primary text-[22px]">psychology</span>
+                    <div>
+                        <p className="font-bold text-slate-900 dark:text-white">Ranking IA</p>
+                        {lastRunLabel && !loading && (
+                            <p className="text-xs text-slate-400">Actualizado: {lastRunLabel}</p>
+                        )}
                     </div>
                 </div>
+                <button
+                    onClick={onRunMatch}
+                    disabled={candidateCount === 0 || loading}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    <span className={`material-symbols-outlined text-[18px] ${loading ? "animate-spin" : ""}`}>
+                        {loading ? "sync" : "psychology"}
+                    </span>
+                    {loading ? "Analizando..." : scores.length > 0 ? "Re-analizar" : "Analizar con IA"}
+                </button>
             </div>
-            {match.explanation && (
-                <p className="mt-3 text-sm text-slate-600 dark:text-slate-300 italic border-l-2 border-slate-300 dark:border-slate-600 pl-3">"{match.explanation}"</p>
+
+            {/* Body */}
+            {loading ? (
+                <div className="py-12 flex flex-col items-center gap-4 text-slate-500">
+                    <span className="material-symbols-outlined text-[40px] text-primary animate-spin">sync</span>
+                    <p className="text-sm">Evaluando {candidateCount} candidato{candidateCount !== 1 ? "s" : ""} con IA...</p>
+                </div>
+            ) : scores.length === 0 ? (
+                <div className="py-12 text-center">
+                    <span className="material-symbols-outlined text-[48px] text-slate-300 dark:text-slate-600 block mb-3">leaderboard</span>
+                    <p className="text-slate-500 text-sm">
+                        {candidateCount === 0
+                            ? "Importa CVs primero para poder analizar."
+                            : "Usa \"Analizar con IA\" para generar el ranking de compatibilidad."}
+                    </p>
+                </div>
+            ) : (
+                <div>
+                    {/* Column headers / sort controls */}
+                    <div className="grid grid-cols-[2rem_1fr_repeat(4,5rem)] px-5 py-2 border-b border-slate-100 dark:border-slate-700/50 bg-slate-50 dark:bg-slate-800/80">
+                        <span />
+                        <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Candidato</span>
+                        {(Object.keys(COL_LABELS) as SortCol[]).map(col => (
+                            <button
+                                key={col}
+                                onClick={() => toggleSort(col)}
+                                className={`flex items-center justify-center gap-0.5 text-[11px] font-bold uppercase tracking-wider transition-colors ${
+                                    sortBy === col
+                                        ? "text-primary"
+                                        : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                }`}
+                            >
+                                {COL_LABELS[col]}
+                                {sortBy === col && (
+                                    <span className="material-symbols-outlined text-[14px]">
+                                        {sortDir === "desc" ? "arrow_downward" : "arrow_upward"}
+                                    </span>
+                                )}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Rows */}
+                    <div className="divide-y divide-slate-100 dark:divide-slate-700/40">
+                        {sorted.map((s, i) => {
+                            const initials = s.full_name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
+                            const dotColor = REC_DOT[s.recommendation] ?? "bg-slate-400";
+                            const recText = REC_TEXT[s.recommendation] ?? "text-slate-500";
+                            return (
+                                <div key={s.candidate_id} className="grid grid-cols-[2rem_1fr_repeat(4,5rem)] items-center px-5 py-3 hover:bg-slate-50 dark:hover:bg-slate-700/20 transition-colors">
+                                    {/* Rank */}
+                                    <span className="text-xs font-bold text-slate-400">#{i + 1}</span>
+
+                                    {/* Name + rec */}
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary to-purple-500 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                                            {initials}
+                                        </div>
+                                        <div className="min-w-0">
+                                            <Link
+                                                href={`/candidates/${s.candidate_id}`}
+                                                className="text-sm font-semibold text-slate-900 dark:text-white hover:text-primary transition-colors truncate block"
+                                            >
+                                                {s.full_name}
+                                            </Link>
+                                            <span className={`flex items-center gap-1 text-[11px] font-medium ${recText}`}>
+                                                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
+                                                {s.recommendation}
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    {/* Score columns */}
+                                    <div className="flex justify-center">
+                                        <ScoreCell value={s.overall_score} highlight={sortBy === "overall_score"} />
+                                    </div>
+                                    <div className="flex justify-center">
+                                        <ScoreCell value={s.skills_score} highlight={sortBy === "skills_score"} />
+                                    </div>
+                                    <div className="flex justify-center">
+                                        <ScoreCell value={s.experience_score} highlight={sortBy === "experience_score"} />
+                                    </div>
+                                    <div className="flex justify-center">
+                                        <ScoreCell value={s.education_score} highlight={sortBy === "education_score"} />
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
             )}
-            <div className="mt-4 space-y-2.5">
-                <ScoreBar label="Habilidades"  value={match.skills_score}     color="bg-primary" />
-                <ScoreBar label="Experiencia"  value={match.experience_score}  color="bg-emerald-500" />
-                <ScoreBar label="Educación"    value={match.education_score}   color="bg-violet-500" />
-            </div>
-            <div className="mt-4 flex flex-wrap gap-3">
-                {match.bonus_skills?.length > 0 && (
-                    <div className="flex flex-wrap gap-1 items-center">
-                        <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold uppercase tracking-wider mr-1">✓</span>
-                        {match.bonus_skills.slice(0, 3).map((s, i) => (
-                            <span key={i} className="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 text-xs font-medium">{s}</span>
-                        ))}
-                    </div>
-                )}
-                {match.missing_skills?.length > 0 && (
-                    <div className="flex flex-wrap gap-1 items-center">
-                        <span className="text-[11px] text-red-500 font-semibold uppercase tracking-wider mr-1">✗</span>
-                        {match.missing_skills.slice(0, 3).map((s, i) => (
-                            <span key={i} className="px-2 py-0.5 rounded-full bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-xs font-medium">{s}</span>
-                        ))}
-                    </div>
-                )}
-            </div>
-            <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700/50">
-                <Link href={`/candidates/${match.candidate_id}`} className="flex items-center justify-center gap-2 w-full px-4 py-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 text-slate-700 dark:text-slate-200 text-sm font-medium hover:bg-primary hover:text-white hover:border-primary transition-all">
-                    Ver perfil completo
-                    <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
-                </Link>
-            </div>
         </div>
     );
 }
 
-const LOADING_STEPS = ["Recuperando CVs del puesto...", "Analizando perfil de cada candidato con IA...", "Clasificando por compatibilidad..."];
-
-function MatchLoadingState({ candidateCount }: { candidateCount?: number }) {
-    const [step, setStep] = useState(0);
-    useEffect(() => {
-        const t1 = setTimeout(() => setStep(1), 800);
-        const t2 = setTimeout(() => setStep(2), candidateCount ? candidateCount * 1200 : 3000);
-        return () => { clearTimeout(t1); clearTimeout(t2); };
-    }, [candidateCount]);
-    return (
-        <div className="py-10 flex flex-col items-center gap-5">
-            <div className="relative">
-                <div className="w-14 h-14 rounded-full bg-primary/10 flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[28px] text-primary animate-spin">psychology</span>
-                </div>
-                <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-primary"></span>
-                </span>
-            </div>
-            <div className="text-center">
-                <p className="font-semibold text-slate-900 dark:text-white">Analizando candidatos con IA</p>
-                {candidateCount != null && <p className="text-sm text-slate-500 mt-1">{candidateCount} CV{candidateCount !== 1 ? "s" : ""} para evaluar</p>}
-            </div>
-            <div className="w-full max-w-xs space-y-3">
-                {LOADING_STEPS.map((s, i) => (
-                    <div key={i} className="flex items-center gap-3">
-                        <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-500 ${i < step ? "bg-emerald-500" : i === step ? "bg-primary animate-pulse" : "bg-slate-200 dark:bg-slate-700"}`}>
-                            {i < step && <span className="material-symbols-outlined text-white text-[14px]">check</span>}
-                        </div>
-                        <span className={`text-sm transition-all ${i <= step ? "text-slate-700 dark:text-slate-200 font-medium" : "text-slate-400"}`}>{s}</span>
-                    </div>
-                ))}
-            </div>
-        </div>
-    );
-}
 
 // ── Main Component ───────────────────────────────────────────────────────────
 
@@ -168,11 +238,9 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
-    // AI match state
-    const [matches, setMatches] = useState<MatchResult[]>([]);
+    // Persisted AI scores
+    const [scores, setScores] = useState<MatchResult[]>([]);
     const [matchLoading, setMatchLoading] = useState(false);
-    const [showMatches, setShowMatches] = useState(false);
-    const [matchLimit, setMatchLimit] = useState(10);
 
     // Per-candidate delete confirm
     const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -193,12 +261,14 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
         setLoading(true);
         setError(null);
         try {
-            const [jobRes, candRes] = await Promise.all([
+            const [jobRes, candRes, scoresRes] = await Promise.all([
                 jobsApi.get(jobId),
                 candidatesApi.list(1, 100, jobId),
+                jobsApi.getScores(jobId).catch(() => null),
             ]);
             setJob(jobRes.data);
             setCandidates(candRes.data.items || []);
+            if (scoresRes?.data?.scores) setScores(scoresRes.data.scores);
         } catch (e: any) {
             setError("No se pudo cargar la convocatoria");
         } finally {
@@ -206,16 +276,13 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
         }
     }
 
-    async function runMatch(limit = matchLimit) {
-        setMatchLimit(limit);
-        setShowMatches(true);
+    async function runMatch() {
         setMatchLoading(true);
-        setMatches([]);
         try {
-            const res = await searchApi.match(jobId, limit);
-            setMatches(res.data.matches || []);
+            const res = await searchApi.match(jobId, 20);
+            setScores(res.data.matches || []);
         } catch {
-            setMatches([]);
+            // keep existing scores
         } finally {
             setMatchLoading(false);
         }
@@ -236,8 +303,8 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
         try {
             await candidatesApi.delete(candidateId);
             setCandidates(prev => prev.filter(c => c.id !== candidateId));
+            setScores(prev => prev.filter(s => s.candidate_id !== candidateId));
             setDeletingId(null);
-            // Update job candidate count
             setJob(prev => prev ? { ...prev, candidate_count: (prev.candidate_count ?? 1) - 1 } : prev);
         } catch (e: any) {
             const msg = e.response?.data?.detail || "Error al eliminar";
@@ -285,7 +352,6 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
         );
     }
 
-    const topCount = matches.filter(m => m.recommendation === "Altamente recomendado" || m.recommendation === "Buena opción").length;
     const isAdmin = user?.role === "admin";
 
     // ── Render ───────────────────────────────────────────────────────────────
@@ -293,7 +359,7 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
     return (
         <div className="space-y-6 max-w-5xl">
 
-            {/* Breadcrumb + back */}
+            {/* Breadcrumb */}
             <div className="flex items-center gap-2 text-sm text-slate-500">
                 <Link href="/jobs" className="hover:text-primary transition-colors flex items-center gap-1">
                     <span className="material-symbols-outlined text-[16px]">arrow_back</span>
@@ -364,21 +430,7 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
                             <span className="material-symbols-outlined text-[18px]">upload_file</span>
                             Importar CVs
                         </button>
-                        <button
-                            onClick={() => runMatch()}
-                            disabled={candidates.length === 0}
-                            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            <span className="material-symbols-outlined text-[18px]">psychology</span>
-                            Analizar con IA
-                        </button>
-
-                        {/* More actions menu */}
-                        <MoreMenu
-                            status={job.status}
-                            onClose={handleCloseJob}
-                            onDelete={() => setShowDeleteJobConfirm(true)}
-                        />
+                        <MoreMenu status={job.status} onClose={handleCloseJob} onDelete={() => setShowDeleteJobConfirm(true)} />
                     </div>
                 </div>
 
@@ -394,7 +446,6 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
 
             {/* ── Job details ── */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                {/* Description + objectives */}
                 {(job.description || (job.key_objectives?.length ?? 0) > 0 || (job.responsibilities?.length ?? 0) > 0) && (
                     <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 space-y-4">
                         {job.description && (
@@ -430,7 +481,6 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
                     </div>
                 )}
 
-                {/* Skills */}
                 {((job.required_skills?.length ?? 0) > 0 || (job.preferred_skills?.length ?? 0) > 0) && (
                     <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 space-y-4">
                         {(job.required_skills?.length ?? 0) > 0 && (
@@ -457,69 +507,13 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
                 )}
             </div>
 
-            {/* ── AI Match Results ── */}
-            {showMatches && (
-                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden">
-                    <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between gap-4">
-                        <div className="flex items-center gap-3">
-                            <span className="material-symbols-outlined text-primary text-[22px]">psychology</span>
-                            <div>
-                                <p className="font-bold text-slate-900 dark:text-white">Análisis IA — Compatibilidad de candidatos</p>
-                                {!matchLoading && matches.length > 0 && (
-                                    <p className="text-xs text-slate-500 mt-0.5">
-                                        {matches.length} analizados
-                                        {topCount > 0 && <span className="ml-2 text-emerald-600 dark:text-emerald-400">· {topCount} recomendados</span>}
-                                    </p>
-                                )}
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            {!matchLoading && (
-                                <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 rounded-lg p-1">
-                                    <span className="text-xs text-slate-400 px-1 font-medium">Top</span>
-                                    {[5, 10, 20].map(n => (
-                                        <button
-                                            key={n}
-                                            onClick={() => runMatch(n)}
-                                            className={`px-2.5 py-1 rounded-md text-xs font-bold transition-colors ${matchLimit === n ? "bg-white dark:bg-slate-700 text-primary shadow-sm" : "text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"}`}
-                                        >{n}</button>
-                                    ))}
-                                </div>
-                            )}
-                            <button onClick={() => setShowMatches(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg text-slate-500 transition-colors">
-                                <span className="material-symbols-outlined">close</span>
-                            </button>
-                        </div>
-                    </div>
-                    <div className="p-6">
-                        {matchLoading ? (
-                            <MatchLoadingState candidateCount={candidates.length} />
-                        ) : matches.length === 0 ? (
-                            <div className="text-center py-10">
-                                <span className="material-symbols-outlined text-[48px] text-slate-300 dark:text-slate-600 block mb-3">person_off</span>
-                                <p className="text-slate-500">Sin candidatos para analizar. Importa CVs primero.</p>
-                            </div>
-                        ) : (
-                            <>
-                                <div className="flex flex-wrap gap-2 mb-5 p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-                                    {Object.entries(RECOMMENDATION_META).map(([key, m]) => {
-                                        const count = matches.filter(x => x.recommendation === key).length;
-                                        if (count === 0) return null;
-                                        return (
-                                            <span key={key} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${m.color} ${m.bg} ${m.border}`}>
-                                                <span className={`w-1.5 h-1.5 rounded-full ${m.dot}`} />{count} {key}
-                                            </span>
-                                        );
-                                    })}
-                                </div>
-                                <div className="space-y-4">
-                                    {matches.map((m, i) => <CandidateMatchCard key={m.candidate_id} match={m} index={i} />)}
-                                </div>
-                            </>
-                        )}
-                    </div>
-                </div>
-            )}
+            {/* ── AI Ranking (persistent) ── */}
+            <RankingSection
+                scores={scores}
+                loading={matchLoading}
+                candidateCount={candidates.length}
+                onRunMatch={runMatch}
+            />
 
             {/* ── Candidates list ── */}
             <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden">
@@ -589,7 +583,7 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
                             </div>
                         </div>
                         <p className="text-sm text-slate-600 dark:text-slate-300 mb-5">
-                            Se eliminará <strong>"{job.title}"</strong>. Los CVs ya procesados no se eliminarán — quedarán sin asignación de puesto.
+                            Se eliminará <strong>"{job.title}"</strong> y todos sus CVs asociados.
                         </p>
                         <div className="flex gap-3">
                             <button
@@ -632,12 +626,10 @@ function CandidateRow({ candidate, isDeleting, isUpdating, isAdmin, onStatusChan
 
     return (
         <div className={`px-6 py-4 flex items-center gap-4 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors ${isDeleting ? "bg-red-50 dark:bg-red-900/10" : ""}`}>
-            {/* Avatar */}
             <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary to-purple-500 flex items-center justify-center text-white text-sm font-bold flex-shrink-0">
                 {initials}
             </div>
 
-            {/* Name + skills */}
             <div className="flex-1 min-w-0">
                 <p className="font-semibold text-slate-900 dark:text-white text-sm truncate">{candidate.full_name}</p>
                 {candidate.skills.length > 0 && (
@@ -647,7 +639,6 @@ function CandidateRow({ candidate, isDeleting, isUpdating, isAdmin, onStatusChan
                 )}
             </div>
 
-            {/* Status select */}
             <div className="flex-shrink-0">
                 {isUpdating ? (
                     <span className="text-xs text-slate-400 animate-pulse">Actualizando...</span>
@@ -664,7 +655,6 @@ function CandidateRow({ candidate, isDeleting, isUpdating, isAdmin, onStatusChan
                 )}
             </div>
 
-            {/* Actions */}
             <div className="flex items-center gap-2 flex-shrink-0">
                 {isDeleting ? (
                     <>
@@ -704,48 +694,36 @@ function MoreMenu({ status, onClose, onDelete }: { status: string; onClose: () =
     const ref = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        function handler(e: MouseEvent) {
+        function handleClick(e: MouseEvent) {
             if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
         }
-        document.addEventListener("mousedown", handler);
-        return () => document.removeEventListener("mousedown", handler);
+        document.addEventListener("mousedown", handleClick);
+        return () => document.removeEventListener("mousedown", handleClick);
     }, []);
 
     return (
         <div className="relative" ref={ref}>
             <button
-                onClick={() => setOpen(v => !v)}
-                className="flex items-center justify-center w-9 h-9 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                onClick={() => setOpen(o => !o)}
+                className="flex items-center gap-1 px-3.5 py-2 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
             >
-                <span className="material-symbols-outlined text-[20px]">more_vert</span>
+                <span className="material-symbols-outlined text-[18px]">more_vert</span>
             </button>
             {open && (
-                <div className="absolute right-0 top-10 z-20 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg py-1 min-w-[180px]">
-                    {status === "active" && (
-                        <button
-                            onClick={() => { setOpen(false); onClose(); }}
-                            className="flex items-center gap-2.5 w-full px-4 py-2.5 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                        >
-                            <span className="material-symbols-outlined text-[18px] text-amber-500">pause_circle</span>
-                            Cerrar convocatoria
-                        </button>
-                    )}
-                    {status === "closed" && (
-                        <button
-                            onClick={() => { setOpen(false); onClose(); }}
-                            className="flex items-center gap-2.5 w-full px-4 py-2.5 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                        >
-                            <span className="material-symbols-outlined text-[18px] text-emerald-500">play_circle</span>
-                            Reabrir convocatoria
-                        </button>
-                    )}
-                    <div className="border-t border-slate-100 dark:border-slate-700 my-1" />
+                <div className="absolute right-0 top-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl z-20 min-w-[180px] overflow-hidden">
                     <button
-                        onClick={() => { setOpen(false); onDelete(); }}
-                        className="flex items-center gap-2.5 w-full px-4 py-2.5 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                        onClick={() => { onClose(); setOpen(false); }}
+                        className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
                     >
-                        <span className="material-symbols-outlined text-[18px]">delete_forever</span>
-                        Eliminar convocatoria
+                        <span className="material-symbols-outlined text-[18px]">{status === "active" ? "lock" : "lock_open"}</span>
+                        {status === "active" ? "Cerrar vacante" : "Reabrir vacante"}
+                    </button>
+                    <button
+                        onClick={() => { onDelete(); setOpen(false); }}
+                        className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                    >
+                        <span className="material-symbols-outlined text-[18px]">delete</span>
+                        Eliminar vacante
                     </button>
                 </div>
             )}

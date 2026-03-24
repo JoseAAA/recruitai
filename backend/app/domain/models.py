@@ -39,25 +39,57 @@ class EducationLevel(str, Enum):
 class ExperienciaProfesional(BaseModel):
     cargo: str = ""
     empresa: str = ""
-    periodo: str = ""  # keep for context
-    fecha_inicio: Optional[str] = None  # format: "YYYY-MM" e.g. "2021-12"
-    fecha_fin: Optional[str] = None     # format: "YYYY-MM" or "Presente"
+    periodo: str = ""
+    fecha_inicio: Optional[str] = None
+    fecha_fin: Optional[str] = None
     es_trabajo_actual: bool = False
     resumen_logros: List[str] = Field(default_factory=list)
+
+    @field_validator("cargo", "empresa", "periodo", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v):
+        return v if v is not None else ""
+
+    @field_validator("resumen_logros", mode="before")
+    @classmethod
+    def _logros_none_to_list(cls, v):
+        return v if v is not None else []
+
+    @field_validator("es_trabajo_actual", mode="before")
+    @classmethod
+    def _bool_coerce(cls, v):
+        return bool(v) if v is not None else False
 
 
 class EducacionProfesional(BaseModel):
     institucion: str = ""
     titulo: str = ""
-    anio_egreso: Optional[str] = None  # e.g. "2019"
-    tipo: str = "educacion"  # "educacion" (universidad, maestria, doctorado, instituto) or "certificacion" (bootcamp, curso, especialización)
+    anio_egreso: Optional[str] = None
+    tipo: str = "educacion"
+
+    @field_validator("institucion", "titulo", "tipo", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v):
+        return v if v is not None else ""
+
+    @field_validator("anio_egreso", mode="before")
+    @classmethod
+    def _anio_to_str(cls, v):
+        if v is None:
+            return None
+        return str(v)
 
 
 class DatosPersonales(BaseModel):
-    nombre_completo: str
+    nombre_completo: str = "Candidato Desconocido"
     telefono: Optional[str] = None
     email: Optional[str] = None
     linkedin: Optional[str] = None
+
+    @field_validator("nombre_completo", mode="before")
+    @classmethod
+    def _name_not_null(cls, v):
+        return v if v else "Candidato Desconocido"
 
 # (Manteniendo ExperienceEntry y EducationEntry originales solo para CandidateDB para no romper el resto del sistema, pero no se usan para el prompt LLM ahora)
 class ExperienceEntry(BaseModel):

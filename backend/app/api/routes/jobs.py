@@ -290,6 +290,43 @@ async def list_jobs(
     )
 
 
+@router.get("/{job_id}/scores")
+async def get_job_scores(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return persisted AI match scores for all candidates of a job, sorted by overall score."""
+    from sqlalchemy import select as sa_select
+    from app.db.models import MatchResultDB
+
+    result = await db.execute(
+        sa_select(MatchResultDB)
+        .where(MatchResultDB.job_id == job_id)
+        .order_by(MatchResultDB.overall_score.desc())
+    )
+    rows = result.scalars().all()
+    return {
+        "job_id": str(job_id),
+        "scores": [
+            {
+                "candidate_id": str(r.candidate_id),
+                "full_name": r.candidate_name or "Desconocido",
+                "overall_score": r.overall_score,
+                "skills_score": r.skills_score or 0.0,
+                "experience_score": r.experience_score or 0.0,
+                "education_score": r.education_score or 0.0,
+                "recommendation": r.recommendation or "Considerar",
+                "explanation": r.explanation or "",
+                "missing_skills": r.missing_skills or [],
+                "bonus_skills": r.bonus_skills or [],
+                "scored_at": r.scored_at.isoformat() if r.scored_at else None,
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+    }
+
+
 @router.get("/{job_id}", response_model=JobProfileResponse)
 async def get_job(
     job_id: UUID,
@@ -437,7 +474,12 @@ async def delete_job(
                 logger.warning(f"Could not delete MinIO CV for {cid}: {e}")
         logger.info(f"Cleaned {len(candidate_ids)} candidates (Qdrant + MinIO) for job {job_id}")
 
-    # Delete job — DB CASCADE removes all linked candidates rows
+    # Explicitly delete candidate rows (FK may be SET NULL on existing DBs, not CASCADE)
+    if candidate_ids:
+        from sqlalchemy import delete as sql_delete
+        await db.execute(sql_delete(CandidateDB).where(CandidateDB.job_id == job_id))
+
+    # Delete job
     await db.delete(job)
     await db.commit()
     logger.info(f"Deleted job {job_id} and {len(candidate_ids)} associated candidates")

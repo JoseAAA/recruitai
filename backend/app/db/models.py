@@ -108,7 +108,7 @@ class JobProfileDB(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # Relationships
-    candidates: Mapped[List["CandidateDB"]] = relationship("CandidateDB", back_populates="job")
+    candidates: Mapped[List["CandidateDB"]] = relationship("CandidateDB", back_populates="job", passive_deletes=True)
 
 
 class AuditLogDB(Base):
@@ -177,11 +177,31 @@ class CloudConnectionDB(Base):
     user: Mapped["UserDB"] = relationship("UserDB")
 
 
+class MatchResultDB(Base):
+    """Persisted AI match scores for candidate-job pairs (maps to match_results table)."""
+    __tablename__ = "match_results"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    candidate_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False)
+    job_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("job_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    candidate_name: Mapped[Optional[str]] = mapped_column(String(255))
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    experience_score: Mapped[Optional[float]] = mapped_column(Float)
+    education_score: Mapped[Optional[float]] = mapped_column(Float)
+    skills_score: Mapped[Optional[float]] = mapped_column(Float)
+    recommendation: Mapped[Optional[str]] = mapped_column(String(50))
+    explanation: Mapped[Optional[str]] = mapped_column(Text)
+    missing_skills: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    bonus_skills: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    scored_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
 class SystemSettingDB(Base):
     """
     System settings stored in database.
-    
-    SECURITY NOTE: 
+
+    SECURITY NOTE:
     - API keys and secrets are NOT stored here (they stay in .env)
     - Only non-sensitive configuration (provider selection, model names, paths)
     """

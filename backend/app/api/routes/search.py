@@ -11,9 +11,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from app.adapters import EmbeddingService, LLMEngine, QdrantRepository
 from app.core.database import get_db
-from app.db.models import CandidateDB, JobProfileDB
+from app.db.models import CandidateDB, JobProfileDB, MatchResultDB
 from app.domain import DEFAULT_SCORING_CONFIG, ScoringService
 
 logger = logging.getLogger(__name__)
@@ -348,6 +350,44 @@ async def match_candidates_to_job(
         ))
 
     matches.sort(key=lambda x: x.overall_score, reverse=True)
+
+    # ── Persist scores to match_results (upsert) ────────────────────────────
+    try:
+        from sqlalchemy import func as sqlfunc
+        for m in matches:
+            stmt = pg_insert(MatchResultDB).values(
+                candidate_id=UUID(m.candidate_id),
+                job_id=request.job_id,
+                candidate_name=m.full_name,
+                overall_score=m.overall_score,
+                skills_score=m.skills_score,
+                experience_score=m.experience_score,
+                education_score=m.education_score,
+                recommendation=m.recommendation,
+                explanation=m.explanation,
+                missing_skills=m.missing_skills,
+                bonus_skills=m.bonus_skills,
+                scored_at=sqlfunc.now(),
+            ).on_conflict_do_update(
+                constraint="match_results_candidate_id_job_id_key",
+                set_={
+                    "candidate_name": m.full_name,
+                    "overall_score": m.overall_score,
+                    "skills_score": m.skills_score,
+                    "experience_score": m.experience_score,
+                    "education_score": m.education_score,
+                    "recommendation": m.recommendation,
+                    "explanation": m.explanation,
+                    "missing_skills": m.missing_skills,
+                    "bonus_skills": m.bonus_skills,
+                    "scored_at": sqlfunc.now(),
+                }
+            )
+            await db.execute(stmt)
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to persist match scores: {e}")
+        await db.rollback()
 
     return MatchResponse(
         job_id=job.id,

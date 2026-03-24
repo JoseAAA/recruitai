@@ -1,165 +1,231 @@
-# RecruitAI 🚀
+# RecruitAI
 
-Sistema de reclutamiento con IA para análisis automático de CVs y matching inteligente de candidatos.
+Sistema de reclutamiento con inteligencia artificial. Sube CVs en PDF o DOCX, extrae automáticamente la información con un LLM, y obtén un ranking de candidatos explicado para cada vacante.
 
-## ⚡ Inicio Rápido (5 minutos)
+Funciona **100% local** con Ollama (sin enviar datos a la nube) o con Gemini/OpenAI si prefieres la nube.
+
+---
+
+## ¿Qué hace?
+
+1. **Subes CVs** → el sistema extrae nombre, email, skills, experiencia y educación automáticamente
+2. **Creas una vacante** con los requisitos y pesos de evaluación personalizados (ej: skills 60%, experiencia 40%)
+3. **Ejecutas el matching IA** → obtienes un ranking de candidatos con puntuación, explicación y skills faltantes
+4. **Generas preguntas de entrevista** para cada candidato directamente desde el resultado del matching
+5. **Gestionas el pipeline** de reclutamiento: preseleccionar, programar entrevista, rechazar, agregar notas
+
+---
+
+## Instalación (5 minutos)
 
 ### Prerrequisitos
-- Docker & Docker Compose
-- API Key de Google Gemini (gratis)
 
-### 1. Configuración
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- Git
+
+Eso es todo. No necesitas Python, Node.js ni ninguna dependencia adicional en tu máquina.
+
+### 1. Clonar y configurar
 
 ```bash
-# Clonar y configurar
+git clone <url-del-repo>
+cd analisis-cv
 cp .env.example .env
 ```
 
-Edita `.env` y agrega:
+Abre `.env` y cambia al menos esto:
+
 ```env
-GEMINI_API_KEY=tu-api-key-aqui
-JWT_SECRET=genera-una-clave-segura-aqui
+JWT_SECRET=pon-aqui-cualquier-cadena-larga-y-aleatoria
 ```
 
-> 💡 **Obtener API Key GRATIS**: [aistudio.google.com](https://aistudio.google.com) → "Get API Key"
-
-### 2. Iniciar (Desarrollo)
+### 2. Arrancar
 
 ```bash
 docker compose up -d
 ```
 
-### 3. Acceder
+La primera vez descarga las imágenes de Docker (~2-3 GB). Espera unos minutos.
+
+### 3. Instalar los modelos de IA
+
+El sistema usa Ollama con dos modelos. Instálalos después de que los contenedores estén corriendo:
+
+```bash
+# Modelo para extraer datos de CVs y hacer matching
+docker exec recruitai-ollama ollama pull gemma3:4b
+
+# Modelo para embeddings (búsqueda semántica)
+docker exec recruitai-ollama ollama pull nomic-embed-text
+```
+
+> La primera descarga tarda 5-10 minutos dependiendo tu internet (~2.5 GB en total).
+
+### 4. Acceder
 
 | Servicio | URL |
 |----------|-----|
-| 🖥️ Dashboard | http://localhost:80 |
-| 📡 API Docs | http://localhost:8000/docs |
-| 🤖 MCP Server | http://localhost:8000/mcp |
+| Dashboard | http://localhost |
+| API Docs (Swagger) | http://localhost:8000/docs |
+| MinIO (archivos) | http://localhost:9001 |
+
+**Usuarios por defecto:**
+- Admin: `admin@recruitai.com` / `change-me-on-first-run`
+- Reclutador: `recruiter@recruitai.com` / `change-me-on-first-run`
+
+> Cambia las contraseñas en `.env` antes de exponer el sistema a internet: `ADMIN_INITIAL_PASSWORD` y `RECRUITER_INITIAL_PASSWORD`.
 
 ---
 
-## ✨ Características
+## Flujo de trabajo típico
 
-### Análisis Automático de CVs
-- **Subida PDF/DOCX** → Extracción automática con IA
-- **Datos estructurados**: Nombre, email, skills, experiencia
-- **Seguridad**: Protección anti-prompt injection (3 capas)
+```
+1. Crear vacante  →  /jobs/new
+   - Título, skills requeridos, nivel de seniority
+   - Ajustar pesos de evaluación (skills / experiencia / educación)
 
-### Matching Inteligente
-- **Búsqueda semántica** con embeddings reales
-- **Scoring explicable** con gráficos radar
-- **Ranking por relevancia** a requisitos del puesto
+2. Subir CVs  →  /data  (o desde la página de la vacante)
+   - Arrastra PDFs o DOCXs
+   - Selecciona la vacante a la que pertenecen
+   - La IA extrae todo automáticamente
 
-### Gestión Completa
-- **Candidatos**: CRUD, filtros, notas, rating
-- **Vacantes**: Requisitos, skills, matching IA
-- **Dashboard**: KPIs, alertas, top candidatos
+3. Ver matching  →  /jobs → [vacante] → "Analizar con IA"
+   - Ranking de candidatos con puntuación 0-100
+   - Explicación en lenguaje natural
+   - Skills que tiene vs skills que faltan
+   - Botón "Preguntas IA" para generar preguntas de entrevista personalizadas
+
+4. Gestionar pipeline  →  /candidates/[id]
+   - Cambiar estado: Preseleccionar / Programar entrevista / Rechazar
+   - Agregar notas de llamadas o entrevistas
+   - Rating 1-5 estrellas
+```
 
 ---
 
-## 🔒 Seguridad & Privacidad
+## Configuración de modelos de IA
 
-### Cumplimiento LPDP Perú (Ley 29733)
-- **PII Masking**: Datos personales se anonimizan antes de enviar a la IA
-- **Encriptación**: AES-256 para datos sensibles
-- **Auditoría**: Registro de accesos a datos personales
-- **Retención**: Políticas de eliminación automática (2 años)
+El archivo `.env` controla qué modelos se usan. Solo edita ese archivo, no hace falta tocar código.
 
-### Protección de Datos en LLM
-```
-CV Original     →   PII Masker    →   CV Anónimo     →   Gemini API
-"Juan Pérez"        (Presidio)        "[PERSON_1]"        (procesa)
-                         ↓
-                  Mapping Encriptado
-                  (AES-256/Fernet)
-```
+### Ollama local (por defecto) — privacidad total
 
-### Defensa Anti-Prompt Injection
-- **22+ patrones** de detección
-- **Límites de longitud** (50K caracteres)
-- **Validación de output** (campos requeridos)
+Los datos nunca salen de tu máquina.
 
----
-
-## 🤖 Configuración de IA
-
-### Gemini (Recomendado - Tier Gratuito)
-```env
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=tu-api-key
-GEMINI_MODEL=gemini-2.0-flash
-```
-
-**Costos estimados:**
-- Tier gratuito: 1,500 requests/día
-- 100 CVs/día ≈ $0.04/día ($1.20/mes)
-
-### Ollama Local con Qwen 3.5 (Privacidad Total)
 ```env
 LLM_PROVIDER=ollama
-OLLAMA_MODEL=qwen3.5:2b
+EXTRACTION_MODEL=gemma3:4b    # Lee y estructura los CVs
+MATCH_MODEL=gemma3:4b         # Evalúa candidatos vs vacante
+EMBEDDING_MODEL=nomic-embed-text
 ```
 
-**Requisitos**: GPU NVIDIA ~3GB VRAM. Instalar modelo:
+**Modelos alternativos:**
+
+| Modelo | VRAM | Velocidad | Calidad |
+|--------|------|-----------|---------|
+| `gemma3:4b` (defecto) | ~3 GB | Media | Buena |
+| `qwen3.5:2b` | ~2 GB | Rápida | Aceptable |
+| `qwen3.5:4b` | ~3 GB | Media | Buena |
+
+Para cambiar de modelo:
 ```bash
-ollama pull qwen3.5:2b
+# Descargar el nuevo modelo
+docker exec recruitai-ollama ollama pull qwen3.5:2b
+
+# Cambiar en .env
+EXTRACTION_MODEL=qwen3.5:2b
+MATCH_MODEL=qwen3.5:2b
+
+# Reiniciar el backend
+docker restart recruitai-backend
 ```
 
-> 💡 **Qwen 3.5 es multimodal nativo** — el mismo modelo procesa texto e imágenes. Un solo modelo para todo.
+### Gemini (nube) — más rápido, sin GPU
+
+```env
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=tu-api-key-aqui
+GEMINI_MODEL=gemini-2.0-flash
+PII_MASKING_ENABLED=true   # Recomendado: anonimiza datos antes de enviar a la nube
+```
+
+Obtén tu API Key gratis en [aistudio.google.com](https://aistudio.google.com) → "Get API Key".
+Tier gratuito: 1,500 requests/día — suficiente para ~500 CVs/día.
 
 ---
 
-## 🔌 MCP Server (AI Agent Integration)
+## Requisitos de hardware
 
-RecruitAI expone un servidor **MCP (Model Context Protocol)** que permite a cualquier cliente AI interactuar con el sistema:
+### Con Ollama local (recomendado)
 
-| Cliente | Cómo Conectar |
-|---------|---------------|
-| Claude Desktop | Agregar URL `http://localhost:8000/mcp` en Settings |
-| Cursor | Configurar MCP server en settings.json |
-| ChatGPT | Usar con plugins MCP |
+| Componente | Mínimo | Recomendado |
+|------------|--------|-------------|
+| GPU NVIDIA | 4 GB VRAM | 6+ GB VRAM |
+| RAM | 8 GB | 16 GB |
+| Disco | 10 GB libres | 20 GB libres |
 
-**Tools disponibles** (auto-descubiertas):
-- Upload CV y extracción automática
-- Búsqueda semántica de candidatos
-- Crear/gestionar vacantes
-- Matching candidato-puesto
-- Generar preguntas de entrevista
-- Dashboard y estadísticas
+> Sin GPU NVIDIA, Ollama funciona en CPU pero es muy lento (~2-3 minutos por CV). Considera usar Gemini en ese caso.
+
+### Con Gemini (nube)
+
+Cualquier máquina con Docker funciona. No necesitas GPU.
 
 ---
 
-## 🏗️ Arquitectura
+## Comandos útiles
 
-```
-┌──────────────────────┐
-│  AI Clients          │
-│  (Claude/Cursor/etc) │
-└──────────┬───────────┘
-           │ MCP Protocol
-┌──────────▼───────────┐     ┌─────────────────┐
-│    Frontend          │────▶│     Nginx       │
-│   (Next.js)          │     │  (Reverse Proxy)│
-└──────────────────────┘     └────────┬────────┘
-                                      │
-                             ┌────────▼────────┐
-                             │     Backend     │──── PII Masker
-                             │  (FastAPI+MCP)  │     (Presidio)
-                             └───┬────┬────┬───┘
-                                 │    │    │
-               ┌─────────────────┤    │    ├──────────────┐
-               ▼                 ▼    │    ▼              ▼
-         ┌──────────┐      ┌──────────┐  ┌────────────────────┐
-         │  Qdrant  │      │ Postgres │  │  LLM Provider      │
-         │(Vectors) │      │ (Data)   │  │  (Gemini/OpenAI/   │
-         └──────────┘      └──────────┘  │   Qwen3.5 Local)   │
-                                         └────────────────────┘
+```bash
+# Ver estado de todos los contenedores
+docker compose ps
+
+# Ver logs en tiempo real
+docker logs recruitai-backend -f
+docker logs recruitai-frontend -f
+
+# Reiniciar un servicio específico (necesario tras editar código en Windows)
+docker restart recruitai-backend
+docker restart recruitai-frontend
+
+# Ver qué modelos están instalados en Ollama
+docker exec recruitai-ollama ollama list
+
+# Detener todo (sin borrar datos)
+docker compose down
+
+# Detener y borrar todos los datos (reset completo)
+docker compose down -v
 ```
 
 ---
 
-## 🚀 Deploy en Producción
+## Arquitectura
+
+```
+┌─────────────┐    http://localhost
+│   Nginx     │◄─────────────────────── Navegador
+│(proxy :80)  │
+└──────┬──────┘
+       ├──► Frontend (Next.js :3000)   → UI del sistema
+       └──► Backend  (FastAPI :8000)   → API REST + MCP Server
+                  │
+         ┌────────┼────────┬────────────┐
+         ▼        ▼        ▼            ▼
+     PostgreSQL  Qdrant   MinIO       Ollama
+     (datos)   (vectores) (archivos)  (LLM local)
+```
+
+**Stack:**
+- Backend: Python 3.11 + FastAPI + SQLAlchemy (async) + Pydantic
+- Frontend: Next.js 14 (App Router) + TypeScript + Tailwind CSS
+- Base de datos: PostgreSQL 15
+- Búsqueda semántica: Qdrant (base de datos vectorial)
+- Almacenamiento de archivos: MinIO (S3-compatible)
+- LLM local: Ollama con gemma3:4b
+
+**MCP Server:** El backend expone sus herramientas como servidor MCP en `http://localhost:8000/mcp`, compatible con Claude Desktop, Cursor y otros clientes AI.
+
+---
+
+## Deploy en producción
 
 ### 1. Generar claves seguras
 
@@ -167,72 +233,58 @@ RecruitAI expone un servidor **MCP (Model Context Protocol)** que permite a cual
 # JWT Secret
 openssl rand -hex 32
 
-# Encryption Key
+# Encryption Key (para PII masking)
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### 2. Configurar .env
+### 2. Configurar `.env` para producción
 
 ```env
 ENVIRONMENT=production
-JWT_SECRET=<tu-jwt-generado>
-ENCRYPTION_KEY=<tu-fernet-key>
+JWT_SECRET=<generado-con-openssl>
+ENCRYPTION_KEY=<generado-con-fernet>
+POSTGRES_PASSWORD=<password-fuerte>
+ADMIN_INITIAL_PASSWORD=<password-fuerte>
+RECRUITER_INITIAL_PASSWORD=<password-fuerte>
+
+# Si usas Gemini en producción:
+LLM_PROVIDER=gemini
 GEMINI_API_KEY=<tu-api-key>
-POSTGRES_PASSWORD=<password-seguro>
+PII_MASKING_ENABLED=true
 ```
 
-### 3. Iniciar en producción
+### 3. Arrancar con el compose de producción
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d
 ```
 
----
-
-## 📁 Estructura del Proyecto
-
-```
-├── backend/
-│   ├── app/
-│   │   ├── adapters/      # LLM, embeddings, Qdrant, PII masker
-│   │   ├── api/routes/    # Endpoints REST
-│   │   ├── core/          # Config, security, privacy
-│   │   └── domain/        # Models
-│   └── requirements.txt
-│
-├── frontend/
-│   └── src/
-│       ├── app/           # Pages
-│       ├── components/    # React components
-│       └── lib/           # API client
-│
-├── docker-compose.yml          # Desarrollo
-├── docker-compose.prod.yml     # Producción
-└── .env.example
-```
+La imagen de producción incluye Ollama y no monta el código fuente como volumen.
 
 ---
 
-## 🧪 Desarrollo Local
+## Solución de problemas
 
-### Backend
+**Los CVs se procesan con 0 años de experiencia**
+El modelo puede no haber extraído las fechas. Sube de nuevo el CV — el prompt incluye reglas específicas para extraer `fecha_inicio` y `fecha_fin`.
+
+**El frontend no muestra los cambios que hice en el código**
+En Windows, el hot-reload de Next.js no detecta cambios del host:
 ```bash
-cd backend
-pip install -r requirements.txt
-# Instalar modelo de NLP para PII
-python -m spacy download es_core_news_sm
-uvicorn app.main:app --reload --port 8000
+docker restart recruitai-frontend
 ```
 
-### Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-```
+**Ollama responde muy lento**
+El modelo se está cargando desde disco (cold start, ~20-30 segundos el primer CV). A partir del segundo CV va mucho más rápido porque el modelo queda en VRAM.
+
+**Error 413 al subir un CV**
+El archivo supera el límite de 50 MB. Los CVs normales no deberían superar ese tamaño.
+
+**Error al hacer matching: "Sin candidatos para analizar"**
+Los CVs deben estar asociados a la vacante al momento de subirlos. Desde la página de la vacante → "Importar CVs", o al subir en `/data` selecciona la vacante en el selector.
 
 ---
 
-## 📝 Licencia
+## Licencia
 
 MIT

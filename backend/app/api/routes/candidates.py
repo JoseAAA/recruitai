@@ -130,10 +130,13 @@ def get_storage() -> StorageService:
 
 def calculate_experience_years(experience_entries: List[ExperienceEntryDB]) -> float:
     """Calculate total years of experience."""
+    from datetime import date as date_type
+    today = date_type.today()
     total_years = 0.0
     for exp in experience_entries:
         if exp.start_date:
-            end = exp.end_date or exp.start_date
+            # For current jobs use today as end date
+            end = today if (exp.is_current or not exp.end_date) else exp.end_date
             years = (end.year - exp.start_date.year) + (end.month - exp.start_date.month) / 12
             total_years += max(0, years)
     return round(total_years, 1)
@@ -266,11 +269,32 @@ async def upload_cv(
         # Add experience entries
         for exp in extracted.experiencia_profesional or []:
             start_d = parse_date_str(exp.fecha_inicio)
-            is_current = exp.es_trabajo_actual or (
-                exp.fecha_fin is None or
-                (exp.fecha_fin or '').strip().lower() in ('presente', 'actual', 'current', 'actualidad', '')
+            _CURRENT_MARKERS = {
+                'presente', 'actual', 'actualidad', 'current',
+                'a la fecha', 'hasta hoy', 'hasta la fecha', 'en curso', 'hoy', '–', '-',
+            }
+            fecha_fin_lower = (exp.fecha_fin or '').strip().lower()
+            is_current = (
+                exp.es_trabajo_actual or
+                fecha_fin_lower in _CURRENT_MARKERS
             )
             end_d = None if is_current else parse_date_str(exp.fecha_fin)
+
+            # Fallback: parse 'periodo' when the LLM filled that field but left
+            # fecha_inicio / fecha_fin as null (common with small models like gemma3:4b).
+            # periodo examples: "Enero 2025 – Actualidad", "Junio 2024 – Septiembre 2024"
+            if exp.periodo and (not start_d or (not is_current and not end_d)):
+                pparts = _re.split(r'\s*[–—]\s*', exp.periodo.strip(), maxsplit=1)
+                if pparts and not start_d:
+                    start_d = parse_date_str(pparts[0])
+                if len(pparts) >= 2 and not is_current:
+                    end_str = pparts[1].strip()
+                    if end_str.lower() in _CURRENT_MARKERS:
+                        is_current = True
+                    elif not end_d:
+                        end_d = parse_date_str(end_str)
+                        if end_d:
+                            is_current = False
             # Build description: only include "Periodo:" line if the text is meaningful
             periodo_text = (exp.periodo or "").strip()
             logros_text = "\n".join(exp.resumen_logros or [])
@@ -616,13 +640,15 @@ async def update_candidate_status(
         )
     
     # Validate status value
-    valid_statuses = ["new", "screening", "interview", "offer", "hired", "rejected"]
+    valid_statuses = ["new", "screening", "shortlisted", "interview", "offer", "hired", "rejected"]
     new_status = status_update.status.lower()
-    
+
     # Map Spanish names to English if needed
     status_mapping = {
         "nuevo": "new",
-        "preseleccionado": "screening",
+        "revisado": "screening",
+        "reviewed": "screening",
+        "preseleccionado": "shortlisted",
         "en entrevista": "interview",
         "entrevista": "interview",
         "oferta": "offer",
