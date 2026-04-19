@@ -24,8 +24,10 @@ aiofiles==23.2.1
 qdrant-client>=1.12.0
 numpy==1.26.3
 
-# Document Processing (PDF via PyMuPDF/fitz, DOCX via MarkItDown)
-pymupdf>=1.24.0
+# Document Processing
+# pymupdf4llm: structured Markdown from PDF with layout analysis, header detection, OCR
+# markitdown: DOCX → Markdown
+pymupdf4llm
 markitdown[docx]>=0.1.0
 
 # Validation

@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from app.core.config import settings
 from app.domain.models import (
     ExtractedJobProfile, ExtractedResume, ExperienceEntry, EducationEntry,
-    ExperienciaProfesional, EducacionProfesional, DatosPersonales,
+    ExperienciaProfesional, EducacionProfesional, DatosPersonales, IdiomaCandidato,
 )
 from app.adapters.llm_providers import get_provider, LLMProvider
 from app.adapters.pii_masker import get_pii_masker, PIIMasker
@@ -48,83 +48,281 @@ class LLMEngine:
     # ===========================================
     
     # Layer 1: Suspicious patterns (regex-based detection)
-    # Categories based on OWASP and common attack vectors
+    # Based on OWASP LLM Top 10 2025 (LLM01); Greshake "Inject My PDF" (2023);
+    # Schneier on Security (2023); multilingual bypass research.
+    # Bilingual: English + Spanish — critical for LatAm market.
+    # Note: all patterns run on lowercased text so case doesn't matter.
     SUSPICIOUS_PATTERNS = [
-        # === INSTRUCTION OVERRIDE ATTEMPTS ===
-        r"ignore\s+(previous|all|above|prior|earlier)\s+instructions?",
-        r"disregard\s+(previous|all|above|prior|earlier)",
-        r"forget\s+(everything|what|previous|all|earlier)",
-        r"override\s+(previous|system|all|earlier)",
+        # ── INSTRUCTION OVERRIDE (English) ──────────────────────────────────
+        # Broader match: catches "ignore all previous scoring" (not just "ignore all previous instructions")
+        r"ignore\s+(all\s+)?(previous|above|prior|earlier)",
+        r"disregard\s+(all\s+)?(previous|above|prior|earlier)",
+        r"forget\s+(everything|what|all\s+previous|prior|earlier)",
+        r"override\s+(previous|system|all|earlier|scoring|instructions?|evaluation)",
         r"do\s+not\s+follow\s+(previous|prior|earlier)",
-        r"stop\s+following\s+(instructions|rules)",
-        
-        # === ROLE HIJACKING / JAILBREAK ===
-        r"you\s+are\s+now\s+a?",
-        r"act\s+as\s+(if\s+you\s+are|a)",
+        r"stop\s+following\s+(instructions|rules|guidelines)",
+        r"discard\s+(all\s+)?(previous|prior|earlier)",
+
+        # ── INSTRUCTION OVERRIDE (Spanish) ──────────────────────────────────
+        r"ignora\s+(todas?\s+)?(las\s+)?instrucciones|ignora\s+(lo\s+)?anterior",
+        r"ignorar\s+(instrucciones?|todo\s+lo\s+anterior)",
+        r"olvida\s+(todo|instrucciones?|lo\s+anterior)",
+        r"descartar?\s+(instrucciones?|indicaciones?)",
+        r"no\s+(sigas?|siga)\s+(las?\s+)?instrucciones?",
+        r"anula\s+(las?\s+)?instrucciones?",
+
+        # ── SCORE / RANKING MANIPULATION (HR-specific — critical) ────────────
+        # Documented: "Score Override: 100/100", "rank this candidate first"
+        r"score\s*(override|=\s*100|:\s*100)",
+        r"scoring\s*override",
+        r"must\s+be\s+ranked\s+(first|#1|número\s+uno)",
+        r"rank\s+(this\s+candidate|me|them)\s+(first|#1)",
+        r"do\s+not\s+rank\s+other\s+candidates",
+        r"no\s+rankees?\s+a\s+(otros?|demás)\s+candidatos?",
+        r"puntuaci[oó]n\s+m[aá]xima\s+autom[aá]ticamente",
+        r"recibe\s+autom[aá]ticamente\s+la\s+puntuaci[oó]n",
+        r"confirma\s+con\s+score\s*=",
+        r"asigna\s+(puntuaci[oó]n|score|puntaje)\s+(de\s+)?100",
+        r"candidato\s+(debe\s+ser|es)\s+el\s+primero",
+        r"primer\s+candidato\s+procesado\s+recibe",
+        r"maximum\s+score\s+automatically",
+        r"give\s+(this\s+candidate|them)\s+(a\s+)?100",
+        r"this\s+candidate\s+must\s+be\s+(ranked\s+first|approved)",
+
+        # ── ROLE HIJACKING / JAILBREAK (English) ────────────────────────────
+        r"you\s+are\s+now\s+(a|an)",
+        r"act\s+as\s+(if\s+you\s+are|a|an)",
         r"pretend\s+(to\s+be|you\s+are)",
         r"roleplay\s+as",
         r"imagine\s+you\s+are",
         r"from\s+now\s+on\s+you\s+are",
-        r"switch\s+to\s+.+\s+mode",
-        r"enter\s+.+\s+mode",
+        r"switch\s+to\s+\w+\s+mode",
+        r"enter\s+\w+\s+mode",
         r"jailbreak",
-        r"DAN\s+mode",  # "Do Anything Now" jailbreak
-        
-        # === SYSTEM PROMPT MANIPULATION ===
-        r"new\s+instructions?:",
-        r"system\s*:\s*",
-        r"```\s*system",
+        r"dan\s+mode",      # "Do Anything Now" jailbreak
+
+        # ── ROLE HIJACKING (Spanish) ─────────────────────────────────────────
+        r"eres\s+ahora\s+(un|una)",
+        r"act[uú]a\s+como\s+(si\s+(fueras?|eres)|un|una)",
+        r"finge\s+(ser|que\s+eres)",
+        r"nuevo\s+rol\s+(del\s+)?(sistema|asistente|modelo)",
+        r"nuevo\s+sistema\s*:",
+        r"est[aá]s\s+en\s+modo",
+        r"modo\s+(evaluaci[oó]n\s+avanzada|administrador|sin\s+restricciones)",
+        r"de\s+ahora\s+en\s+(adelante\s+)?(eres?|act[uú]as?)",
+
+        # ── SYSTEM PROMPT MANIPULATION ───────────────────────────────────────
+        r"new\s+instructions?\s*:",
+        r"nuevas?\s+instrucciones?\s*:",
         r"\[system\]",
+        r"```\s*system",
         r"<\s*system\s*>",
-        r"assistant\s*:\s*",
-        r"\[INST\]",
-        r"<<SYS>>",
-        
-        # === OUTPUT MANIPULATION ===
+        r"\[inst\]",
+        r"<<sys>>",
+        r"instrucciones?\s+del\s+sistema\s*:",
+
+        # ── OUTPUT MANIPULATION ───────────────────────────────────────────────
         r"respond\s+only\s+with",
         r"output\s+only",
         r"return\s+only\s+the\s+following",
-        r"print\s+the\s+following",
         r"say\s+exactly",
         r"your\s+response\s+must\s+be",
-        
-        # === ENCODING TRICKS / OBFUSCATION ===
+        r"responde\s+[uú]nicamente\s+con",
+        r"tu\s+respuesta\s+debe\s+(ser|contener)",
+
+        # ── ENCODING TRICKS / OBFUSCATION ────────────────────────────────────
         r"base64\s*:",
-        r"hex\s*:",
         r"\\x[0-9a-f]{2}",
-        r"unicode\s*:",
-        r"rot13\s*:",
+        r"rot13",
         r"decode\s+this",
-        
-        # === DATA EXFILTRATION ATTEMPTS ===
-        r"reveal\s+(your|the)\s+(system|prompt|instructions)",
+
+        # ── DATA EXFILTRATION ATTEMPTS ────────────────────────────────────────
+        r"reveal\s+(your|the)\s+(system|prompt|instructions?)",
         r"show\s+me\s+(your|the)\s+prompt",
-        r"what\s+are\s+your\s+instructions",
         r"repeat\s+(your|the)\s+(system|initial)\s+prompt",
-        r"print\s+your\s+instructions",
-        
-        # === INDIRECT INJECTION (from external content) ===
+        r"muestra\s+(tus?|las?)\s+instrucciones?",
+        r"cu[aá]les\s+son\s+tus\s+instrucciones?",
+
+        # ── INDIRECT INJECTION ────────────────────────────────────────────────
         r"if\s+you\s+are\s+an?\s+(ai|assistant|llm)",
         r"dear\s+(ai|assistant|model)",
-        r"attention\s+(ai|assistant|model)",
-        r"instructions?\s+for\s+(the\s+)?(ai|assistant|model)",
-        
-        # === CODE EXECUTION ATTEMPTS ===
-        r"execute\s+(this|the\s+following)",
-        r"run\s+(this|the\s+following)\s+code",
-        r"<script>",
-        r"javascript:",
+        r"attention\s+(ai|assistant|llm|model)",
+        r"atenci[oó]n\s+(ia|asistente|modelo)",
+
+        # ── CODE EXECUTION ATTEMPTS ───────────────────────────────────────────
+        r"<script\b",
+        r"javascript\s*:",
         r"eval\s*\(",
     ]
     
     # Layer 2: Maximum input lengths (prevent token exhaustion attacks)
     MAX_CV_LENGTH = 50000  # ~10 pages of text
     MAX_JOB_DESCRIPTION_LENGTH = 20000
-    
+
     # Layer 3: Required output fields (ensure LLM doesn't deviate)
     REQUIRED_RESUME_FIELDS = {"nombre", "email", "skills"}
     REQUIRED_JOB_FIELDS = {"titulo", "requisitos"}
-    
+
+    # ── JSON Schemas for constrained decoding (Ollama >= 0.5) ──────────────────
+    # Constrained decoding makes it physically impossible for the model to emit
+    # tokens that violate the schema. Key benefits vs free-form json_mode:
+    # - enum fields ("tipo", "recommendation") → model CANNOT produce invalid values
+    # - required fields → always present in output
+    # - type constraints → scores are always numbers, never strings
+    # Ref: Willard & Louf "Efficient Guided Generation for LLMs" (2023);
+    #      Ollama structured outputs documentation (2024)
+    # ──────────────────────────────────────────────────────────────────────────
+    RESUME_JSON_SCHEMA = {
+        "type": "object",
+        "required": ["datos_personales", "habilidades", "idiomas", "experiencia_profesional", "educacion"],
+        "properties": {
+            "datos_personales": {
+                "type": "object",
+                "required": ["nombre_completo"],
+                "properties": {
+                    "nombre_completo": {"type": "string"},
+                    "telefono": {"type": ["string", "null"]},
+                    "email": {"type": ["string", "null"]},
+                    "linkedin": {"type": ["string", "null"]},
+                    "github": {"type": ["string", "null"]},
+                },
+            },
+            "habilidades": {"type": "array", "items": {"type": "string"}},
+            "idiomas": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["idioma", "nivel"],
+                    "properties": {
+                        "idioma": {"type": "string"},
+                        "nivel": {"type": "string"},
+                        "certificacion": {"type": ["string", "null"]},
+                    },
+                },
+            },
+            "experiencia_profesional": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["cargo", "empresa"],
+                    "properties": {
+                        "cargo": {"type": "string"},
+                        "empresa": {"type": "string"},
+                        "fecha_inicio": {"type": ["string", "null"]},
+                        "fecha_fin": {"type": ["string", "null"]},
+                        "es_trabajo_actual": {"type": "boolean"},
+                        "resumen_logros": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+            "educacion": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["institucion", "titulo", "tipo"],
+                    "properties": {
+                        "institucion": {"type": "string"},
+                        "titulo": {"type": "string"},
+                        "tipo": {"type": "string", "enum": ["educacion", "certificacion"]},
+                        "fecha_inicio": {"type": ["string", "null"]},
+                        "fecha_fin": {"type": ["string", "null"]},
+                    },
+                },
+            },
+        },
+    }
+
+    JOB_PROFILE_JSON_SCHEMA = {
+        "type": "object",
+        "required": ["title", "description", "required_skills", "preferred_skills", "responsibilities"],
+        "properties": {
+            "title": {"type": "string"},
+            "department": {"type": ["string", "null"]},
+            "description": {"type": ["string", "null"]},
+            "seniority_level": {
+                "type": ["string", "null"],
+                "enum": ["junior", "mid-level", "senior", "lead", "manager", None],
+            },
+            "work_modality": {
+                "type": ["string", "null"],
+                "enum": ["remote", "hybrid", "onsite", None],
+            },
+            "industry": {"type": ["string", "null"]},
+            "required_skills": {"type": "array", "items": {"type": "string"}},
+            "preferred_skills": {"type": "array", "items": {"type": "string"}},
+            "responsibilities": {"type": "array", "items": {"type": "string"}},
+            "key_objectives": {"type": "array", "items": {"type": "string"}},
+            "min_experience_years": {"type": "integer", "minimum": 0},
+            "education_level": {
+                "type": ["string", "null"],
+                "enum": ["bachelor", "master", "phd", "high_school", "associate", None],
+            },
+            "required_languages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["idioma", "nivel", "obligatorio"],
+                    "properties": {
+                        "idioma": {"type": "string"},
+                        "nivel": {
+                            "type": "string",
+                            "enum": ["Básico", "Intermedio", "Avanzado", "Nativo", "Bilingüe"],
+                        },
+                        "obligatorio": {"type": "boolean"},
+                    },
+                },
+            },
+        },
+    }
+
+    MATCH_JSON_SCHEMA = {
+        "type": "object",
+        "required": [
+            "_razonamiento_previo",
+            "skills_score", "experience_score", "education_score",
+            "explanation", "recommendation", "missing_critical_skills",
+            "guia_entrevista",
+        ],
+        "properties": {
+            # _razonamiento_previo: fuerza al modelo a razonar ANTES de producir números.
+            # En modelos normales: escribe el razonamiento aquí como texto.
+            # En modelos thinking (qwen3, deepseek-r1): ya razonaron internamente,
+            # usan este campo como resumen. Ambos casos producen scores más precisos.
+            "_razonamiento_previo": {"type": "string"},
+            "skills_score": {"type": "number", "minimum": 0, "maximum": 100},
+            "experience_score": {"type": "number", "minimum": 0, "maximum": 100},
+            "education_score": {"type": "number", "minimum": 0, "maximum": 100},
+            "explanation": {"type": "string"},
+            "recommendation": {
+                "type": "string",
+                "enum": ["Altamente recomendado", "Buena opción", "Considerar", "No recomendado"],
+            },
+            "missing_critical_skills": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "relevant_experience_years": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Years in roles directly relevant to the job title",
+            },
+            "guia_entrevista": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["tipo", "pregunta"],
+                    "properties": {
+                        "tipo": {
+                            "type": "string",
+                            "enum": ["validar_logro", "explorar_brecha", "validar_inferencia"],
+                        },
+                        "pregunta": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+
     # Layer 4: Output scanning - detect if LLM was compromised
     OUTPUT_ANOMALY_PATTERNS = [
         r"I\s+(am|was)\s+(forced|instructed|told)\s+to",
@@ -174,18 +372,70 @@ class LLMEngine:
         
         return self._provider_available
     
-    def sanitize_input(self, text: str, max_length: int = None) -> str:
+    def sanitize_input(
+        self,
+        text: str,
+        max_length: int = None,
+        extra_fragments: list[str] | None = None,
+    ) -> str:
         """
-        Basic input truncation to prevent memory exhaustion.
-        Removed aggressive sanitization to preserve pure Docling Markdown.
+        Sanitize and validate input text.
+
+        Steps:
+        1. Truncate to prevent token-exhaustion attacks.
+        2. Strip invisible Unicode characters (zero-width spaces, RTL override,
+           Unicode tag block — used in steganographic payloads).
+        3. Scan the visible text AND any extra hidden-text fragments (white text,
+           micro-font text, metadata from the PDF security scan) for known
+           injection patterns.
+
+        Args:
+            text:             Primary extracted text.
+            max_length:       Override maximum character limit.
+            extra_fragments:  Hidden text found by the PDF security scanner
+                              (SecurityScanResult.hidden_text_fragments).
+                              These are checked for injection patterns even if
+                              they don't appear in the primary text.
         """
         if max_length is None:
             max_length = self.MAX_CV_LENGTH
-            
+
         if len(text) > max_length:
             logger.warning(f"Input truncated from {len(text)} to {max_length} chars")
             text = text[:max_length]
-            
+
+        # Strip invisible Unicode before pattern matching
+        # (RTL override U+202E, zero-width space U+200B, Unicode tags, etc.)
+        _INVISIBLE = (
+            "\u200b\u200c\u200d\u200e\u200f"
+            "\u202a\u202b\u202c\u202d\u202e"
+            "\u2060\u2061\u2062\u2063\u2064"
+            "\ufeff"
+        )
+        _invisible_set = set(_INVISIBLE)
+        if any(ch in _invisible_set for ch in text):
+            logger.warning("Invisible Unicode characters stripped from input before injection scan")
+            text = "".join(ch for ch in text if ch not in _invisible_set)
+
+        # Build the combined corpus to scan:
+        # visible text + hidden fragments from PDF security scan
+        scan_corpus = text
+        if extra_fragments:
+            scan_corpus = scan_corpus + "\n" + "\n".join(extra_fragments)
+
+        # Layer 1: Check for known injection patterns in both visible + hidden text
+        corpus_lower = scan_corpus.lower()
+        for pattern in self.SUSPICIOUS_PATTERNS:
+            if re.search(pattern, corpus_lower, re.IGNORECASE):
+                logger.warning(
+                    f"Prompt injection pattern detected: {pattern[:60]!r} "
+                    f"(scanned {len(scan_corpus)} chars including {len(extra_fragments or [])} hidden fragments)"
+                )
+                raise PromptInjectionError(
+                    "El documento contiene instrucciones maliciosas embebidas y fue rechazado. "
+                    "Si crees que esto es un error, convierte el CV a texto plano antes de subirlo."
+                )
+
         return text
     
     def validate_output(self, output: dict, required_fields: set) -> bool:
@@ -199,30 +449,31 @@ class LLMEngine:
     def scan_output(self, output: str) -> bool:
         """
         Scan LLM output for signs of successful prompt injection.
-        
+
         Layer 4 defense: detect if LLM was manipulated.
-        Returns True if output appears safe, False if anomalies detected.
-        
-        Note: Logs warning but doesn't block to avoid false positives.
+        Returns True if output appears safe.
+        Raises PromptInjectionError if anomalies are detected.
         """
         if not output:
             return True
-        
+
         output_lower = output.lower()
         anomalies_found = []
-        
+
         for pattern in self.OUTPUT_ANOMALY_PATTERNS:
             if re.search(pattern, output_lower, re.IGNORECASE):
                 anomalies_found.append(pattern)
-        
+
         if anomalies_found:
             logger.warning(
                 f"Potential output manipulation detected. "
                 f"Patterns matched: {len(anomalies_found)}. "
                 f"First match: {anomalies_found[0][:50]}"
             )
-            return False
-        
+            raise PromptInjectionError(
+                "LLM output contains signs of successful prompt injection and was rejected."
+            )
+
         return True
     
     def _extract_resume_simple(self, text: str, filename: str = "") -> ExtractedResume:
@@ -292,12 +543,32 @@ class LLMEngine:
                 full_name = clean_name.title()
         
         # Extract email
-        email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+        email_match = re.search(r'[\w\.\-\+]+@[\w\.\-]+\.\w{2,}', text)
         email = email_match.group(0) if email_match else None
-        
-        # Extract phone
-        phone_match = re.search(r'[\+]?[\d\s\-\(\)]{7,15}', text)
-        phone = phone_match.group(0).strip() if phone_match else None
+
+        # Extract phone — patterns ordered from most specific to least
+        # Covers Peruvian numbers (9 digits, start with 9) and international formats
+        _phone_patterns = [
+            r'\+51[\s\-]?9\d{2}[\s\-]?\d{3}[\s\-]?\d{3}',          # +51 9XX XXX XXX
+            r'51[\s\-]9\d{2}[\s\-]?\d{3}[\s\-]?\d{3}',              # 51 9XX XXX XXX
+            r'\+\d{1,3}[\s\-]?\(?\d{2,4}\)?[\s\-]?\d{3,4}[\s\-]?\d{3,4}',  # +XX intl
+            r'(?<!\d)9\d{2}[\s\-]?\d{3}[\s\-]?\d{3}(?!\d)',         # 9XX XXX XXX (Perú)
+            r'\(?\d{2,3}\)?[\s\-]\d{4}[\s\-]\d{4}',                 # (01) XXXX XXXX
+        ]
+        phone = None
+        for _pat in _phone_patterns:
+            m = re.search(_pat, text)
+            if m:
+                phone = m.group(0).strip()
+                break
+
+        # Extract LinkedIn URL
+        linkedin_match = re.search(
+            r'(?:https?://)?(?:www\.)?linkedin\.com/in/[\w\-_%]+', text, re.IGNORECASE
+        )
+        linkedin = linkedin_match.group(0) if linkedin_match else None
+        if linkedin and not linkedin.startswith("http"):
+            linkedin = "https://" + linkedin
         
         # Extract skills (keywords commonly found in CVs)
         skill_keywords = [
@@ -317,8 +588,10 @@ class LLMEngine:
         
         # ============ EXPERIENCE EXTRACTION ============
         experience_entries = []
-        # Look for patterns like "2020 - 2024", "Enero 2020 - Presente"
-        date_pattern = r'(\d{4})\s*[-–]\s*(presente|actual|current|\d{4})'
+        # Patterns: "2020 - 2024", "Enero 2020 - Presente", "Jan 2020 - Present"
+        date_pattern = (
+            r'(\d{4})\s*[-–]\s*(presente|actual|actualidad|current|present|ongoing|hoy|\d{4})'
+        )
         # Job title patterns
         job_titles = [
             'desarrollador', 'developer', 'analista', 'analyst', 'gerente', 'manager',
@@ -352,7 +625,7 @@ class LLMEngine:
                         start_year = int(date_match.group(1))
                         start_date = date_type(start_year, 1, 1)
                         end = date_match.group(2)
-                        if end.lower() in ['presente', 'actual', 'current']:
+                        if end.lower() in ['presente', 'actual', 'actualidad', 'current', 'present', 'ongoing', 'hoy']:
                             is_current = True
                             end_date = None
                         else:
@@ -468,7 +741,7 @@ class LLMEngine:
                 nombre_completo=full_name,
                 telefono=phone,
                 email=email,
-                linkedin=None,
+                linkedin=linkedin,
             ),
             habilidades=list(set(found_skills)),
             experiencia_profesional=exp_profesional,
@@ -607,111 +880,50 @@ TEXTO DEL CV A ANALIZAR:
         
         return restore_value(data)
     
-    async def extract_resume(self, text: str, filename: str = "") -> ExtractedResume:
-        """Extract structured resume data from raw text (Markdown via pymupdf4llm)."""
-        
+    async def extract_resume(
+        self,
+        text: str,
+        filename: str = "",
+        hidden_fragments: list[str] | None = None,
+    ) -> ExtractedResume:
+        """Extract structured resume data from raw text (Markdown via pymupdf4llm).
+
+        Args:
+            text:             Visible text extracted from the document.
+            filename:         Original filename (used by the regex fallback extractor).
+            hidden_fragments: Hidden text found by the PDF security scanner
+                              (white text, micro-font, off-page, metadata).
+                              These are passed to sanitize_input() so injection
+                              patterns are checked even against invisible content.
+        """
         extraction_model = getattr(settings, "EXTRACTION_MODEL", None)
+
+        sanitized_text = self.sanitize_input(text, extra_fragments=hidden_fragments)
         
-        sanitized_text = self.sanitize_input(text)
-        
-        # Build a clean prompt with an explicit example — much more effective
-        # for small models (gemma3:4b) than sending the verbose Pydantic JSON Schema.
-        prompt = f"""Eres un experto en extracción de datos de CVs. Analiza el texto y devuelve ÚNICAMENTE un JSON con la estructura del ejemplo.
+        # Prompt optimizado para modelos thinking (Gemma 4 E2B).
+        # Los modelos thinking razonan internamente antes de generar output.
+        # Principio: prompts concisos + schema JSON = mejor resultado que
+        # listas largas de reglas que el modelo puede contradecir.
+        # El constrained decoding via JSON Schema garantiza estructura válida.
+        # Ref: Google Gemma 4 prompting guide (2025); "Large Language Models are
+        # Zero-Shot Reasoners" (Kojima et al., 2022) — el modelo infiere reglas
+        # implícitas cuando el contexto es claro.
+        prompt = f"""Eres un extractor de datos de CVs. Tu ÚNICA salida es JSON puro válido. Sin saludos, sin explicaciones, sin bloques ```json. Solo el objeto JSON. NUNCA inventes datos; si algo falta usa null.
 
-REGLAS ESTRICTAS:
-1. Devuelve SOLO el JSON, sin texto adicional, sin markdown, sin ```json.
-2. Si un dato opcional no aparece, usa null. EXCEPCIONES: los campos "cargo", "empresa", "titulo", "institucion" NUNCA deben ser null — usa cadena vacía "" si no están disponibles. NUNCA uses "N/A", "No especificado".
-3. El texto fue extraído de un PDF por bloques ordenados por posición. En CVs con diseño de columnas, los datos de distintas secciones aparecen INTERCALADOS en el texto (ej: una fila puede contener empresa de experiencia + institución de educación mezcladas). Usa los encabezados de sección (EXPERIENCIA, EDUCACIÓN, HABILIDADES, IDIOMAS, etc.) para clasificar correctamente cada dato aunque aparezcan fuera de orden.
-4. El nombre del candidato suele estar en las primeras líneas del texto, posiblemente dividido en múltiples líneas (nombre de pila en una línea, apellido(s) en la siguiente). Identifica y concatena las líneas iniciales que formen el nombre completo.
-5. Busca el email aunque esté separado por espacios o saltos de línea.
-6. Busca el teléfono incluyendo prefijos internacionales (+34, +51, +52, etc.).
+REGLAS CRÍTICAS:
+1. "nombre_completo": Convierte a Title Case. Ej: "ANA ROBLES" → "Ana Robles".
+2. "telefono": SOLO el número en la sección de datos de contacto/cabecera (junto al email o LinkedIn). IGNORA completamente los números que aparezcan dentro de la experiencia laboral, referencias o cuerpo del CV. Copia el dígito exactamente como aparece. Si no está claramente como dato de contacto, usa null. NUNCA combines ni construyas un número.
+3. "email": Solo el que aparece literalmente en los datos de contacto. NUNCA construyas uno a partir del nombre.
+4. "linkedin": URL completa que aparece en los datos de contacto. Formatos: "linkedin.com/in/usuario", "https://www.linkedin.com/in/usuario". Une fragmentos si está partido en dos líneas. Si no hay URL de LinkedIn, usa null.
+5. "habilidades": Extrae todas las tecnologías, herramientas, metodologías y competencias del CV completo. Array de strings. Sin duplicados.
+6. "idiomas": Idioma + nivel (Básico/Intermedio/Avanzado/Nativo/C1/B2/etc). Si hay certificación oficial (TOEFL, IELTS, Cambridge, EF SET) ponla en "certificacion"; si no, usa null.
+7. "fecha_inicio"/"fecha_fin": Formato "YYYY-MM". Si solo hay año: "YYYY-01". Si el trabajo SIGUE ACTIVO (palabras: actualidad, presente, actual, vigente, hoy, en curso, present, current): fecha_fin = "Presente" Y es_trabajo_actual = true. Si termina con fecha concreta: es_trabajo_actual = false.
+8. "institucion": Expande siglas. "UNMSM"→"Universidad Nacional Mayor de San Marcos", "PUCP"→"Pontificia Universidad Católica del Perú", "UPC"→"Universidad Peruana de Ciencias Aplicadas".
+9. "tipo" en educacion: "educacion" = SOLO grados formales (Bachiller, Licenciatura, Ingeniería, Maestría, MBA, Doctorado). "certificacion" = todo lo demás: diplomados, cursos, bootcamps, certificaciones AWS/Google/Microsoft/Coursera/Udemy/Platzi.
 
-REGLAS DE NORMALIZACIÓN (MUY IMPORTANTE):
-7. "nombre_completo": SIEMPRE en formato Título (Title Case). Ej: "JOSE ALARCON ARONE" → "Jose Alarcon Arone". NUNCA todo en mayúsculas.
-8. "cargo": Título de puesto en formato Título. Ej: "ANALISTA DE DATOS SENIOR" → "Analista de Datos Senior".
-9. "empresa": Nombre de empresa en formato Título. Ej: "CAMPOSOL" → "Camposol" si es una palabra. Siglas conocidas (IBM, SAP, AWS) se mantienen en mayúsculas.
-10. "institucion" (educación): Escribe el NOMBRE COMPLETO de la institución. Ej: "UNMSM" → "Universidad Nacional Mayor de San Marcos", "UNI" → "Universidad Nacional de Ingeniería", "PUCP" → "Pontificia Universidad Católica del Perú", "UPC" → "Universidad Peruana de Ciencias Aplicadas", "UTP" → "Universidad Tecnológica del Perú".
-11. "linkedin": URL limpia sin espacios. Si el URL está en dos líneas, únelas. Ej: "linkedin.com/in/jose- alarcon" → "linkedin.com/in/jose-alarcon". Elimina cualquier espacio en el URL.
-
-REGLAS PARA EXPERIENCIA PROFESIONAL:
-12. "periodo": texto legible del período, SIEMPRE que haya fechas (ej: "Enero 2021 - Mayo 2024"). Si no hay fechas, usa null.
-13. "fecha_inicio": formato "YYYY-MM" (ej: "2021-01"). OBLIGATORIO si hay año/mes visible. Si solo hay año, usa "YYYY-01".
-14. "fecha_fin": formato "YYYY-MM" o exactamente la cadena "Presente". Cualquier variante que indique que el trabajo sigue activo ("Presente", "Actual", "Actualidad", "Current", "A la fecha", "Hasta hoy", "Hasta la fecha", "En curso", "–", "Hoy", o campo vacío) → escribe SIEMPRE "Presente". NUNCA uses null cuando el trabajo sigue activo.
-15. "es_trabajo_actual": true SOLO si fecha_fin es "Presente" o el cargo sigue activo.
-16. "resumen_logros": lista de logros/responsabilidades. Cada ítem debe comenzar con verbo en pasado o infinitivo (ej: "Implementé...", "Lideré...", "Desarrollé..."). Si no hay, usa lista vacía [].
-
-REGLAS PARA EDUCACIÓN (campo "tipo" es OBLIGATORIO):
-17. tipo = "educacion" → SOLO títulos académicos formales de grado o posgrado: Bachiller, Licenciatura, Ingeniería, Técnico Superior Universitario, Maestría/Máster, Doctorado, MBA. Si tienes dudas, usa "certificacion".
-18. tipo = "certificacion" → TODO lo demás: bootcamp, curso online, diplomado, especialización, taller, certificado profesional, cualquier plataforma (Coursera, Udemy, Platzi, LinkedIn Learning), certificaciones de empresa (Google, AWS, Microsoft, Oracle, Cisco, Scrum, PMP). También aplica a cursos cortos de instituciones presenciales.
-19. Para tipo="certificacion": "titulo" = NOMBRE del curso o certificado (ej: "Data Science", "Power BI Integral", "Bootcamp de MLOps"); "institucion" = PLATAFORMA o ENTIDAD que lo emitió (ej: "Coursera", "ADDC Perú", "Código Facilito"). NUNCA pongas el nombre de la plataforma como titulo. NUNCA uses palabras genéricas como titulo: "Certificación", "Certificaciones", "Educación", "Formación", "Diploma", "Título", "Curso" — si no puedes identificar el nombre exacto del curso, omite esa entrada del JSON.
-20. "anio_egreso": año de graduación/finalización como string (ej: "2020"). Si no aparece, usa null.
-21. En CVs con educación en formato tabla o columnas, si ves grupos de nombres de programas seguidos de listas de institución+año, empareja cada programa con su institución en el mismo orden de aparición.
-
-EJEMPLO DE RESPUESTA:
-{{
-  "datos_personales": {{
-    "nombre_completo": "María García López",
-    "telefono": "+34 612345678",
-    "email": "maria.garcia@gmail.com",
-    "linkedin": "https://www.linkedin.com/in/maria-garcia"
-  }},
-  "habilidades": ["Python", "SQL", "Power BI", "Machine Learning", "Excel"],
-  "experiencia_profesional": [
-    {{
-      "cargo": "Analista de Datos Senior",
-      "empresa": "Empresa ABC",
-      "periodo": "Enero 2021 - Mayo 2024",
-      "fecha_inicio": "2021-01",
-      "fecha_fin": "2024-05",
-      "es_trabajo_actual": false,
-      "resumen_logros": ["Automatizó procesos ETL reduciendo tiempos un 40%", "Lideró migración de base de datos"]
-    }},
-    {{
-      "cargo": "Data Analyst",
-      "empresa": "Tech Corp",
-      "periodo": "Junio 2024 - Presente",
-      "fecha_inicio": "2024-06",
-      "fecha_fin": "Presente",
-      "es_trabajo_actual": true,
-      "resumen_logros": ["Lideró equipo de 5 personas", "Implementó dashboard de KPIs"]
-    }}
-  ],
-  "educacion": [
-    {{
-      "institucion": "Universidad Nacional Mayor de San Marcos",
-      "titulo": "Bachiller en Estadística",
-      "anio_egreso": "2021",
-      "tipo": "educacion"
-    }},
-    {{
-      "institucion": "EAE Business School",
-      "titulo": "Máster en Big Data & Analytics",
-      "anio_egreso": "2020",
-      "tipo": "educacion"
-    }},
-    {{
-      "institucion": "Coursera",
-      "titulo": "Data Science",
-      "anio_egreso": "2020",
-      "tipo": "certificacion"
-    }},
-    {{
-      "institucion": "ADDC Perú",
-      "titulo": "Power BI Integral",
-      "anio_egreso": "2022",
-      "tipo": "certificacion"
-    }},
-    {{
-      "institucion": "Código Facilito",
-      "titulo": "Bootcamp de MLOps",
-      "anio_egreso": "2024",
-      "tipo": "certificacion"
-    }}
-  ]
-}}
-
-TEXTO DEL CV A ANALIZAR:
-{sanitized_text}"""
+<TEXTO_CV>
+{sanitized_text}
+</TEXTO_CV>"""
 
         system_msg = "Eres un extractor de datos de CVs. Devuelve SOLO JSON válido, sin texto adicional."
         
@@ -728,7 +940,7 @@ TEXTO DEL CV A ANALIZAR:
                 raw_output = await provider_to_use.generate(
                     prompt=prompt,
                     system_prompt=system_msg,
-                    json_mode=True,
+                    json_schema=self.RESUME_JSON_SCHEMA,
                     temperature=0.1,
                     max_tokens=4096
                 )
@@ -737,39 +949,68 @@ TEXTO DEL CV A ANALIZAR:
                     await provider_to_use.close()
             
             logger.debug(f"LLM resume response: {raw_output[:300]}...")
-            
+
+            # Layer 4: scan output for signs of successful injection
+            self.scan_output(raw_output)
+
             try:
                 parsed = json.loads(raw_output)
                 resume = ExtractedResume.model_validate(parsed)
-                return self._normalize_extracted_resume(resume)
+                return self._normalize_extracted_resume(resume, text=sanitized_text)
             except json.JSONDecodeError:
                 json_match = re.search(r'\{.*\}', raw_output, re.DOTALL)
                 if json_match:
                     parsed = json.loads(json_match.group())
                     resume = ExtractedResume.model_validate(parsed)
-                    return self._normalize_extracted_resume(resume)
+                    return self._normalize_extracted_resume(resume, text=sanitized_text)
                 raise ValueError(f"Could not parse LLM response as JSON: {raw_output[:200]}")
+        except PromptInjectionError:
+            raise
         except Exception as e:
             logger.error(f"LLM resume extraction failed: {e}, falling back to simple extraction")
             return self._extract_resume_simple(sanitized_text, filename=filename)
 
-    def _normalize_extracted_resume(self, resume: "ExtractedResume") -> "ExtractedResume":
+    def _normalize_extracted_resume(self, resume: "ExtractedResume", text: str = "") -> "ExtractedResume":
         """Post-process LLM output: normalize casing, clean LinkedIn URLs, etc."""
         KNOWN_ABBREVS = {
+            # Perú — universidades nacionales
             "unmsm": "Universidad Nacional Mayor de San Marcos",
             "uni": "Universidad Nacional de Ingeniería",
+            "unfv": "Universidad Nacional Federico Villarreal",
+            "unac": "Universidad Nacional del Callao",
+            "unajma": "Universidad Nacional José María Arguedas",
+            "unam": "Universidad Nacional Autónoma de México",  # MX (same acronym, context-dependent)
+            # Perú — universidades privadas
             "pucp": "Pontificia Universidad Católica del Perú",
             "upc": "Universidad Peruana de Ciencias Aplicadas",
             "utp": "Universidad Tecnológica del Perú",
             "udep": "Universidad de Piura",
             "usil": "Universidad San Ignacio de Loyola",
             "ulima": "Universidad de Lima",
-            "unfv": "Universidad Nacional Federico Villarreal",
-            "unac": "Universidad Nacional del Callao",
             "upn": "Universidad Privada del Norte",
             "ucsur": "Universidad Científica del Sur",
             "usat": "Universidad Católica Santo Toribio de Mogrovejo",
             "uct": "Universidad Católica de Trujillo",
+            "ucv": "Universidad César Vallejo",
+            "uladech": "Universidad Católica Los Ángeles de Chimbote",
+            "upeu": "Universidad Peruana Unión",
+            "uss": "Universidad Señor de Sipán",
+            "uancv": "Universidad Andina Néstor Cáceres Velásquez",
+            "unsaac": "Universidad Nacional de San Antonio Abad del Cusco",
+            # España
+            "uam": "Universidad Autónoma de Madrid",
+            "ucm": "Universidad Complutense de Madrid",
+            "upm": "Universidad Politécnica de Madrid",
+            "upv": "Universidad Politécnica de Valencia",
+            "uab": "Universidad Autónoma de Barcelona",
+            "ub": "Universidad de Barcelona",
+            "us": "Universidad de Sevilla",
+            # México / Argentina / Colombia
+            "unam": "Universidad Nacional Autónoma de México",
+            "ipn": "Instituto Politécnico Nacional",
+            "uba": "Universidad de Buenos Aires",
+            "unal": "Universidad Nacional de Colombia",
+            "uandes": "Universidad de los Andes",
         }
         # Acronyms that stay in uppercase
         KEEP_UPPER = {"ibm", "sap", "aws", "gcp", "sql", "bi", "erp", "crm", "hr", "rrhh",
@@ -799,12 +1040,84 @@ TEXTO DEL CV A ANALIZAR:
                 url = "https://" + url
             return url
 
+        # Spanish and English month abbreviations → int
+        _MONTH_MAP = {
+            'ene': 1, 'enero': 1, 'jan': 1, 'january': 1,
+            'feb': 2, 'febrero': 2, 'february': 2,
+            'mar': 3, 'marzo': 3, 'march': 3,
+            'abr': 4, 'abril': 4, 'apr': 4, 'april': 4,
+            'may': 5, 'mayo': 5,
+            'jun': 6, 'junio': 6, 'june': 6,
+            'jul': 7, 'julio': 7, 'july': 7,
+            'ago': 8, 'agosto': 8, 'aug': 8, 'august': 8,
+            'sep': 9, 'sept': 9, 'septiembre': 9, 'september': 9,
+            'oct': 10, 'octubre': 10, 'october': 10,
+            'nov': 11, 'noviembre': 11, 'november': 11,
+            'dic': 12, 'diciembre': 12, 'dec': 12, 'december': 12,
+        }
+
+        def normalize_date(val: str | None) -> str | None:
+            """Convert any date string to YYYY-MM or 'Presente' / null."""
+            if not val:
+                return val
+            v = val.strip()
+            # Already correct
+            if re.match(r'^\d{4}-\d{2}$', v):
+                return v
+            # YYYY-MM-DD → YYYY-MM (LLM sometimes emits full ISO despite instructions)
+            m = re.match(r'^(\d{4})-(\d{2})-\d{2}$', v)
+            if m:
+                return f"{m.group(1)}-{m.group(2)}"
+            # "Presente" variants
+            _ACTIVE = {'presente', 'actual', 'actualidad', 'a la fecha', 'hasta hoy',
+                       'en curso', 'hoy', 'vigente', 'actualmente',
+                       'present', 'current', 'now', 'ongoing', 'to date', 'till date'}
+            if v.lower() in _ACTIVE:
+                return 'Presente'
+            # DD/MM/YYYY
+            m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', v)
+            if m:
+                return f"{m.group(3)}-{m.group(2).zfill(2)}"
+            # MM/YYYY or MM-YYYY
+            m = re.match(r'^(\d{1,2})[/\-](\d{4})$', v)
+            if m:
+                return f"{m.group(2)}-{m.group(1).zfill(2)}"
+            # YYYY/MM or YYYY-MM already handled above; this catches YYYY.MM
+            m = re.match(r'^(\d{4})[./](\d{2})$', v)
+            if m:
+                return f"{m.group(1)}-{m.group(2)}"
+            # "Month YYYY" or "YYYY Month" with named month
+            m = re.match(r'^([a-záéíóúü]{3,})\s+(\d{4})$', v, re.IGNORECASE)
+            if m:
+                mon = _MONTH_MAP.get(m.group(1).lower().rstrip('.'))
+                if mon:
+                    return f"{m.group(2)}-{str(mon).zfill(2)}"
+            m = re.match(r'^(\d{4})\s+([a-záéíóúü]{3,})$', v, re.IGNORECASE)
+            if m:
+                mon = _MONTH_MAP.get(m.group(2).lower().rstrip('.'))
+                if mon:
+                    return f"{m.group(1)}-{str(mon).zfill(2)}"
+            # YYYY only
+            m = re.match(r'^(\d{4})$', v)
+            if m:
+                return f"{m.group(1)}-01"
+            return val  # unknown format — keep as-is
+
         def normalize_institution(name: str) -> str:
             if not name:
                 return name
             key = name.strip().lower().rstrip(".")
+            # Exact acronym match
             if key in KNOWN_ABBREVS:
                 return KNOWN_ABBREVS[key]
+            # Fuzzy acronym match: handle "U.N.M.S.M", "unmsm.", punctuation variations
+            clean_key = re.sub(r'[.\s-]', '', key)  # remove dots/spaces/hyphens
+            if clean_key in KNOWN_ABBREVS:
+                return KNOWN_ABBREVS[clean_key]
+            # Partial match: if the institution name contains a known acronym as a word
+            for abbrev, full_name in KNOWN_ABBREVS.items():
+                if re.search(r'\b' + re.escape(abbrev) + r'\b', key):
+                    return full_name
             return to_title(name)
 
         dp = resume.datos_personales
@@ -819,6 +1132,26 @@ TEXTO DEL CV A ANALIZAR:
                 exp.cargo = to_title(exp.cargo)
             if exp.empresa:
                 exp.empresa = to_title(exp.empresa)
+            exp.fecha_inicio = normalize_date(exp.fecha_inicio)
+            exp.fecha_fin = normalize_date(exp.fecha_fin)
+            # Keep es_trabajo_actual in sync
+            if exp.fecha_fin == "Presente":
+                exp.es_trabajo_actual = True
+            elif exp.fecha_fin and exp.fecha_fin != "Presente":
+                exp.es_trabajo_actual = False
+
+        # Skills: deduplicate case-insensitively, apply Title Case
+        if resume.habilidades:
+            seen_skill_keys: set[str] = set()
+            clean_skills: list[str] = []
+            for skill in resume.habilidades:
+                if not skill or not skill.strip():
+                    continue
+                key = skill.strip().lower()
+                if key not in seen_skill_keys:
+                    seen_skill_keys.add(key)
+                    clean_skills.append(to_title(skill.strip()))
+            resume.habilidades = clean_skills
 
         # Section-label titles the LLM uses as a fallback when it can't read
         # the actual certification/degree name (common with multi-column PDF tables).
@@ -830,6 +1163,28 @@ TEXTO DEL CV A ANALIZAR:
             'grado', 'estudios', 'curso', 'cursos',
         }
 
+        # Patterns that indicate a certification/course name is starting
+        # (used to detect concatenated degree+course titles from multi-column tables)
+        _FORMAL_DEGREE_START = re.compile(
+            r'^(licenciado?\s+en|bachiller\s+en|ingenier[ií]a?\s+en|ingenier[ií]a?\b|'
+            r'maestr[ií]a?\s+en|maestr[ií]a?\b|máster\b|mba\b|doctorado\b|'
+            r'técnico\s+en|técnico\s+superior|técnico\b)',
+            re.IGNORECASE,
+        )
+        # Keywords that clearly start a new certification/course name
+        _CERT_BOUNDARY = re.compile(
+            r'(?<!\w)('
+            r'data\s+science|machine\s+learning|deep\s+learning|power\s+bi|'
+            r'sql\s+server|sql\s+server\s+integration|'
+            r'bootcamp\s+de|bootcamp\b|mlops\b|devops\b|'
+            r'scrum\b|pmp\b|aws\b|azure\b|google\s+cloud|'
+            r'tableau\b|excel\b|python\b|r\s+programming|'
+            r'inteligencia\s+artificial|business\s+intelligence|'
+            r'coursera\b|udemy\b|platzi\b|linkedin\s+learning'
+            r')',
+            re.IGNORECASE,
+        )
+
         clean_edu = []
         seen_titulos: set[str] = set()
         for edu in resume.educacion or []:
@@ -837,6 +1192,21 @@ TEXTO DEL CV A ANALIZAR:
                 edu.institucion = normalize_institution(edu.institucion)
             if edu.titulo:
                 edu.titulo = to_title(edu.titulo)
+
+            # Fix concatenated titles from multi-column PDF tables:
+            # e.g. "Licenciado En Estadística Data Science Power BI Integral SQL Server Bootcamp De Mlops"
+            # → truncate to just "Licenciado En Estadística"
+            if edu.titulo and edu.tipo == "educacion" and len(edu.titulo) > 55:
+                if _FORMAL_DEGREE_START.match(edu.titulo):
+                    m = _CERT_BOUNDARY.search(edu.titulo)
+                    if m and m.start() > 10:
+                        original = edu.titulo
+                        edu.titulo = edu.titulo[:m.start()].strip().rstrip(",;-–")
+                        logger.info(
+                            f"Truncated concatenated degree title: "
+                            f"'{original[:80]}...' → '{edu.titulo}'"
+                        )
+
             # Drop entries whose title is a generic section label
             titulo_lower = edu.titulo.strip().lower()
             if titulo_lower in _GENERIC_TITLES:
@@ -849,8 +1219,51 @@ TEXTO DEL CV A ANALIZAR:
             clean_edu.append(edu)
         resume.educacion = clean_edu
 
+        # Phone: always extract from raw text (regex is more reliable than the LLM for this).
+        # gemma3:4b often hallucinates phone numbers or copies one from experience sections.
+        # Strategy: try Peruvian patterns first (high precision), then generic fallback.
+        # If raw text has a match → use it and discard the LLM value.
+        # If raw text has NO match → keep LLM value only if it looks like a real number
+        #   (≥7 consecutive digits); otherwise null to avoid showing wrong contact info.
+        if dp and text:
+            _phone_patterns = [
+                r'\(\+51\)[\s\-]?9\d{2}[\s\-]?\d{3}[\s\-]?\d{3}',       # (+51) 9XX XXX XXX
+                r'\+51[\s\-]?9\d{2}[\s\-]?\d{3}[\s\-]?\d{3}',            # +51 9XX XXX XXX
+                r'51[\s\-]9\d{2}[\s\-]?\d{3}[\s\-]?\d{3}',               # 51 9XX XXX XXX
+                r'(?<!\d)9\d{2}[\s\-]?\d{3}[\s\-]?\d{3}(?!\d)',          # 9XX XXX XXX (Perú mobile)
+                r'\(0\d{1,2}\)[\s\-]?\d{4}[\s\-]?\d{4}',                 # (01) XXXX XXXX landline
+            ]
+            found_in_text = None
+            for _pat in _phone_patterns:
+                m = re.search(_pat, text)
+                if m:
+                    found_in_text = m.group(0).strip()
+                    break
+
+            if found_in_text:
+                dp.telefono = found_in_text
+            elif dp.telefono:
+                # Validate the LLM value: must contain at least 7 consecutive digits
+                llm_phone = dp.telefono
+                digits_only = re.sub(r'\D', '', llm_phone)
+                if len(digits_only) < 7:
+                    dp.telefono = None
+                    logger.warning(f"Discarded suspicious LLM phone '{llm_phone}' (< 7 digits)")
+
+        # LinkedIn: extract from raw text if LLM missed it or got it wrong.
+        if dp and not dp.linkedin and text:
+            _li_match = re.search(
+                r'(?:https?://)?(?:www\.)?linkedin\.com/in/[\w\-_%]+',
+                text, re.IGNORECASE
+            )
+            if _li_match:
+                url = _li_match.group(0).strip()
+                if not url.startswith("http"):
+                    url = "https://" + url
+                dp.linkedin = url
+
         return resume
-    
+
     async def extract_job_profile(self, text: str) -> ExtractedJobProfile:
         """Extract structured job description data using an example-based prompt."""
         if not await self._is_provider_available():
@@ -858,62 +1271,34 @@ TEXTO DEL CV A ANALIZAR:
 
         sanitized = self.sanitize_input(text)
 
-        example_json = """{
-  "title": "Desarrollador Backend Senior",
-  "department": "Tecnología",
-  "description": "El puesto lidera el desarrollo de APIs RESTful en un equipo ágil de 8 personas. Es responsable de diseñar microservicios escalables y asegurar la calidad del código.",
-  "seniority_level": "senior",
-  "work_modality": "hybrid",
-  "industry": "Tecnología / Fintech",
-  "required_skills": ["Python", "FastAPI", "PostgreSQL", "Docker", "Git"],
-  "preferred_skills": ["Kubernetes", "Redis", "AWS"],
-  "responsibilities": [
-    "Diseñar e implementar APIs RESTful con FastAPI",
-    "Revisar código de otros desarrolladores del equipo",
-    "Optimizar consultas SQL y modelos de base de datos",
-    "Escribir pruebas unitarias e de integración",
-    "Participar en planificación de sprints y estimaciones"
-  ],
-  "key_objectives": [
-    "Reducir latencia de APIs en un 30% en los primeros 3 meses",
-    "Migrar el servicio de pagos a microservicios antes del Q3",
-    "Implementar cobertura de pruebas al 80%"
-  ],
-  "min_experience_years": 3,
-  "education_level": "bachelor"
-}"""
-
-        prompt = f"""Eres un experto en Recursos Humanos. Analiza el siguiente texto de una descripción de puesto de trabajo y extrae la información en formato JSON.
-
-DEVUELVE ÚNICAMENTE el JSON, sin texto adicional, sin markdown, sin explicaciones.
-
-El JSON debe seguir EXACTAMENTE esta estructura (rellena con los datos del texto):
-{example_json}
+        # Prompt optimizado para Gemma 4 (thinking model).
+        # Sin example_json con valores concretos: los modelos thinking tienden a
+        # copiar ejemplos al output cuando los valores del ejemplo son verosímiles.
+        # El constrained decoding via JOB_PROFILE_JSON_SCHEMA garantiza los enums
+        # (seniority_level, work_modality, education_level) sin necesidad de ejemplos.
+        prompt = f"""Actúa como un analizador de vacantes laborales. Tu ÚNICA salida debe ser un objeto JSON válido. NO incluyas saludos, ni texto previo/posterior, ni bloques de código markdown (```json). Devuelve solo el JSON crudo. No asumas ni inventes requisitos que no estén explícitos.
 
 REGLAS:
-- "title": título exacto del puesto (OBLIGATORIO, nunca omitir)
-- "department": área o departamento, null si no se menciona
-- "description": resumen de 2-4 oraciones del rol y sus objetivos
-- "seniority_level": nivel del puesto — "junior", "mid-level", "senior", "lead", "manager" o null
-- "work_modality": modalidad — "remote", "hybrid", "onsite" o null
-- "industry": industria/sector de la empresa o null
-- "required_skills": habilidades OBLIGATORIAS como strings cortos
-- "preferred_skills": habilidades DESEABLES como strings cortos
-- "responsibilities": lista de 5-10 responsabilidades concretas del día a día
-- "key_objectives": lista de 3-5 objetivos/KPIs clave que el puesto debe lograr
-- "min_experience_years": número entero (0 si no se especifica)
-- "education_level": "bachelor", "master", "phd", "high_school" o null
+1. "title": título exacto del puesto. OBLIGATORIO. No lo inventes si no aparece.
+2. "seniority_level": "junior", "mid-level", "senior", "lead", "manager" o null.
+3. "work_modality": "remote", "hybrid", "onsite" o null.
+4. "education_level": "bachelor", "master", "phd", "high_school", "associate" o null.
+5. "required_skills" y "preferred_skills": no repitas habilidades entre ellos.
+6. "responsibilities": array de 5 a 10 tareas concretas extraídas del texto.
+7. "key_objectives": array de 3 a 5 metas o indicadores mencionados.
+8. "min_experience_years": número entero. 0 si no se especifica.
+9. "description": resumen de 2-4 oraciones del rol y sus objetivos principales.
+10. "required_languages": array de idiomas requeridos o deseables. Nivel SOLO puede ser: "Básico", "Intermedio", "Avanzado", "Nativo", "Bilingüe". "obligatorio": true si el texto lo indica como requisito, false si es deseable. Array vacío [] si no se mencionan idiomas.
 
-TEXTO DEL PUESTO:
+<TEXTO_PUESTO>
 {sanitized}
-
-JSON:"""
+</TEXTO_PUESTO>"""
 
         try:
             raw = await self.provider.generate(
                 prompt=prompt,
-                system_prompt="Eres un extractor de datos JSON. Responde SOLO con JSON válido.",
-                json_mode=True,
+                system_prompt="Eres un extractor de datos JSON para perfiles de puesto. Devuelve SOLO JSON válido.",
+                json_schema=self.JOB_PROFILE_JSON_SCHEMA,
                 temperature=0.1,
                 max_tokens=2048,
             )
@@ -928,6 +1313,39 @@ JSON:"""
             if not parsed.get("title"):
                 first_line = next((l.strip() for l in sanitized.splitlines() if l.strip()), "")
                 parsed["title"] = first_line[:100]
+
+            # Ensure description fallback: if LLM skipped it, use first substantial paragraph
+            if not parsed.get("description"):
+                paragraphs = [p.strip() for p in sanitized.split("\n\n") if len(p.strip()) > 60]
+                parsed["description"] = paragraphs[0][:600] if paragraphs else sanitized[:400]
+
+            # Normalize and deduplicate skills
+            def _dedup_skills(lst):
+                if not lst:
+                    return lst
+                seen: set[str] = set()
+                out = []
+                for s in lst:
+                    if not s or not s.strip():
+                        continue
+                    key = s.strip().lower()
+                    if key not in seen:
+                        seen.add(key)
+                        # Title-case simple words; keep multi-word as-is with capitalize
+                        out.append(s.strip())
+                return out
+
+            parsed["required_skills"] = _dedup_skills(parsed.get("required_skills"))
+            parsed["preferred_skills"] = _dedup_skills(parsed.get("preferred_skills"))
+
+            # Remove preferred skills that are also required (avoid overlap confusion)
+            req_lower = {s.lower() for s in (parsed.get("required_skills") or [])}
+            if parsed.get("preferred_skills"):
+                parsed["preferred_skills"] = [
+                    s for s in parsed["preferred_skills"]
+                    if s.lower() not in req_lower
+                ]
+
             return ExtractedJobProfile.model_validate(parsed)
         except Exception as e:
             logger.error(f"extract_job_profile failed: {e}")
@@ -952,6 +1370,8 @@ JSON:"""
             "education_score": 60.0,
             "explanation": "Análisis basado en coincidencia de habilidades.",
             "recommendation": recommendation,
+            "missing_critical_skills": [],
+            "guia_entrevista": [],
         }
 
     async def reason_candidate_match(
@@ -973,52 +1393,67 @@ JSON:"""
         if not await self._is_provider_available():
             return self._fallback_match_scores(candidate_skills, required_skills)
 
-        # Use up to 3000 chars of raw CV text — enough for full context
-        cv_context = (candidate_raw_text or "")[:3000]
-        skills_str = ", ".join(candidate_skills[:20]) if candidate_skills else "No disponibles"
-        req_str = ", ".join(required_skills[:15]) if required_skills else "No especificadas"
-        pref_str = ", ".join(preferred_skills[:10]) if preferred_skills else "No especificadas"
+        # Sanitize all user-controlled inputs before injecting into the prompt.
+        # This prevents prompt injection from malicious CV content or job field values.
+        def _strip_injection(text: str, max_len: int) -> str:
+            """Remove control sequences and truncate."""
+            if not text:
+                return ""
+            # Strip common injection markers and keep plain text
+            cleaned = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+            cleaned = re.sub(r'<[^>]{1,60}>', '', cleaned)  # strip html/xml tags
+            cleaned = re.sub(r'\[/?INST\]|<<SYS>>|</s>', '', cleaned)
+            cleaned = re.sub(r'(?i)(system|assistant|user)\s*:', '', cleaned)
+            return cleaned[:max_len].strip()
 
-        # /no_think disables qwen3.5 chain-of-thought output in the response.
-        # The model still reasons internally but doesn't emit <think> blocks,
-        # allowing json_mode to work correctly.
-        prompt = f"""/no_think
-Eres un reclutador experto con 15 años de experiencia en RRHH. Analiza el CV del candidato para el puesto indicado.
+        cv_context  = _strip_injection(candidate_raw_text or "", 5000)
+        safe_title  = _strip_injection(job_title, 120)
+        safe_desc   = _strip_injection(job_description, 1200)
+        skills_str  = ", ".join(re.sub(r'[^\w\s\+\#\.\-]', '', s)[:60] for s in candidate_skills[:20]) if candidate_skills else "No disponibles"
+        req_str     = ", ".join(re.sub(r'[^\w\s\+\#\.\-]', '', s)[:60] for s in required_skills[:15]) if required_skills else "No especificadas"
+        pref_str    = ", ".join(re.sub(r'[^\w\s\+\#\.\-]', '', s)[:60] for s in preferred_skills[:10]) if preferred_skills else "No especificadas"
 
-=== PUESTO ===
-Título: {job_title}
+        # Razonamiento condicional: solo se añade cuando el modelo tiene
+        # chain-of-thought interno (OLLAMA_THINKING=true: qwen3, deepseek-r1).
+        # Con modelos normales (gemma3:4b, llama3.2) y constrained decoding activo,
+        # los pasos de razonamiento no pueden emitirse como texto — el JSON Schema
+        # los fuerza al primer token. Los criterios explícitos de puntuación son más
+        # útiles para modelos pequeños que instrucciones de razonamiento que no pueden seguir.
+        prompt = f"""Actúa como el motor de evaluación de un sistema ATS. Compara el perfil del candidato con los requisitos del puesto. Tu ÚNICA salida debe ser un objeto JSON válido. NO uses formato markdown (```json) ni texto fuera del JSON.
+
+<DATOS_DEL_PUESTO>
+Título: {safe_title}
 Experiencia mínima requerida: {min_experience_years} años
-Descripción: {job_description[:400]}
-Habilidades requeridas: {req_str}
-Habilidades deseables: {pref_str}
+Habilidades REQUERIDAS: {req_str}
+Habilidades DESEABLES: {pref_str}
+Descripción: {safe_desc}
+</DATOS_DEL_PUESTO>
 
-=== CURRÍCULUM ===
+<DATOS_DEL_CANDIDATO>
+Habilidades detectadas: {skills_str}
 {cv_context}
+</DATOS_DEL_CANDIDATO>
 
-=== HABILIDADES DETECTADAS ===
-{skills_str}
-
-Razona paso a paso antes de dar las puntuaciones:
-PASO 1 — Habilidades: ¿Cuáles de las requeridas tiene el candidato? ¿Cuáles le faltan? Calcula un porcentaje realista.
-PASO 2 — Experiencia: ¿Cuántos años tiene? ¿Los roles son relevantes para {job_title}? ¿Ha trabajado en contextos similares?
-PASO 3 — Educación: ¿Su formación es adecuada para el puesto?
-PASO 4 — Conclusión: ¿Vale la pena entrevistar a esta persona?
-
-Responde ÚNICAMENTE con JSON válido (sin texto extra):
-{{
-    "skills_score": <número 0-100>,
-    "experience_score": <número 0-100>,
-    "education_score": <número 0-100>,
-    "explanation": "<frase concisa máx 25 palabras explicando el punto más destacado>",
-    "recommendation": "<exactamente uno de: Altamente recomendado | Buena opción | Considerar | No recomendado>"
-}}"""
+CRITERIOS ESTRICTOS DE PUNTUACIÓN:
+- "_razonamiento_previo": Analiza brevemente (3-4 líneas) la coincidencia de habilidades, los años reales trabajados vs los solicitados, y la validez de su educación para este rol específico.
+- "skills_score" (0-100): Porcentaje de required_skills que el candidato posee realmente.
+- "experience_score" (0-100): 100=supera años requeridos con rol idéntico; 70=cumple años con rol similar; 40=cerca pero rol distinto; 10=sin experiencia relevante.
+- "education_score" (0-100): 100=título universitario afín; 70=técnico/incompleto afín; 50=certificaciones afines sin título; 30=formación no relacionada.
+- "explanation": 2-3 frases concisas (máx 60 palabras) sobre puntos fuertes y débiles del candidato.
+- "recommendation": "Altamente recomendado" (skills>=75 Y experience>=70) | "Buena opción" (ambos>=55) | "Considerar" (alguno>=40) | "No recomendado".
+- "relevant_experience_years": Número entero (0, 1, 2, …). Suma SOLO los años en roles cuya función principal coincide con "{safe_title}" (mismo área: operaciones, procesos, TI, ventas, etc.). Excluye roles de áreas no relacionadas, prácticas y voluntariados. Usa las fechas del CV. Si no hay experiencia relevante, pon 0.
+- "missing_critical_skills": Array con las habilidades REQUERIDAS que el candidato NO tiene. Array vacío si las tiene todas.
+- "guia_entrevista": Exactamente 3 preguntas de entrevista focalizadas. Usa los tipos: "validar_logro" (verificar un logro o experiencia concreta del CV), "explorar_brecha" (profundizar en una habilidad faltante), "validar_inferencia" (confirmar una habilidad inferida pero no explícita). Una pregunta por tipo. Preguntas cortas, concretas, abiertas."""
 
         try:
-            # qwen3.5 uses ~1500-2000 tokens for internal reasoning before generating content.
-            # max_tokens must cover both thinking + JSON output.
+            # max_tokens=2500: cubre tanto el presupuesto de thinking interno
+            # (modelos thinking: qwen3, deepseek-r1) como el JSON de salida.
+            # Para modelos normales (gemma3:4b) el JSON ocupa ~200 tokens — sobra margen.
+            # json_schema garantiza constrained decoding: el enum de recommendation
+            # y los rangos de score son imposibles de violar.
             raw = await self.provider.generate(
                 prompt=prompt,
-                json_mode=True,
+                json_schema=self.MATCH_JSON_SCHEMA,
                 temperature=0.15,
                 max_tokens=2500,
             )
@@ -1047,12 +1482,34 @@ Responde ÚNICAMENTE con JSON válido (sin texto extra):
             if recommendation not in valid_recommendations:
                 recommendation = "Considerar"
 
+            # Validate and clean guia_entrevista
+            raw_guia = result.get("guia_entrevista", [])
+            valid_tipos = {"validar_logro", "explorar_brecha", "validar_inferencia"}
+            guia_entrevista = [
+                {"tipo": item.get("tipo", "validar_logro"), "pregunta": str(item.get("pregunta", ""))[:300]}
+                for item in (raw_guia if isinstance(raw_guia, list) else [])
+                if isinstance(item, dict) and item.get("pregunta") and item.get("tipo") in valid_tipos
+            ][:3]  # max 3 questions
+
+            raw_rel_years = result.get("relevant_experience_years")
+            relevant_experience_years = (
+                max(0.0, float(raw_rel_years))
+                if isinstance(raw_rel_years, (int, float)) and not isinstance(raw_rel_years, bool)
+                else None
+            )
+
             return {
                 "skills_score": float(min(max(result.get("skills_score", 50), 0), 100)),
                 "experience_score": float(min(max(result.get("experience_score", 50), 0), 100)),
                 "education_score": float(min(max(result.get("education_score", 50), 0), 100)),
-                "explanation": str(result.get("explanation", "Perfil analizado por IA."))[:250],
+                "explanation": str(result.get("explanation", "Perfil analizado por IA."))[:500],
                 "recommendation": recommendation,
+                "relevant_experience_years": relevant_experience_years,
+                "missing_critical_skills": [
+                    str(s) for s in result.get("missing_critical_skills", [])
+                    if s and isinstance(s, str)
+                ][:10],
+                "guia_entrevista": guia_entrevista,
             }
         except Exception as e:
             logger.error(f"reason_candidate_match failed: {e}")
@@ -1077,142 +1534,4 @@ Responde ÚNICAMENTE con JSON válido (sin texto extra):
         """Check if the configured LLM provider is available."""
         return await self._is_provider_available()
     
-    async def generate_interview_questions(
-        self,
-        candidate_name: str,
-        candidate_skills: list[str],
-        job_title: str,
-        job_required_skills: list[str],
-        job_preferred_skills: list[str],
-        skill_gaps: list[str],
-        matching_skills: list[str]
-    ) -> dict:
-        """
-        Generate tailored interview questions using the configured LLM provider.
-        Returns questions in different categories: technical, behavioral, situational.
-        """
-        # Fallback when no provider is available
-        if not await self._is_provider_available():
-            return self._generate_fallback_questions(
-                candidate_name, candidate_skills, job_title,
-                job_required_skills, skill_gaps, matching_skills
-            )
-        
-        prompt = f"""Eres un experto reclutador de RRHH. Genera preguntas de entrevista personalizadas para evaluar a un candidato.
-
-CANDIDATO: {candidate_name}
-PUESTO: {job_title}
-HABILIDADES DEL CANDIDATO: {', '.join(candidate_skills[:10]) if candidate_skills else 'No especificadas'}
-HABILIDADES REQUERIDAS: {', '.join(job_required_skills[:10]) if job_required_skills else 'No especificadas'}
-HABILIDADES QUE LE FALTAN: {', '.join(skill_gaps[:5]) if skill_gaps else 'Ninguna'}
-HABILIDADES QUE COINCIDEN: {', '.join(matching_skills[:5]) if matching_skills else 'Ninguna'}
-
-Genera las siguientes preguntas en formato JSON:
-{{
-    "technical_questions": [
-        // 3-4 preguntas técnicas para evaluar las habilidades que coinciden y explorar las que faltan
-    ],
-    "gap_questions": [
-        // 2-3 preguntas específicas sobre las habilidades que le faltan (skill gaps)
-        // Enfocadas en evaluar capacidad de aprendizaje y experiencia relacionada
-    ],
-    "behavioral_questions": [
-        // 2 preguntas de comportamiento relacionadas con el rol
-    ],
-    "situational_questions": [
-        // 2 preguntas situacionales del día a día del puesto
-    ]
-}}
-
-Cada pregunta debe ser específica, profesional y en español.
-Devuelve SOLO el JSON válido, sin texto adicional."""
-
-        try:
-            raw_output = await self.provider.generate(
-                prompt=prompt,
-                json_mode=True,
-                temperature=0.7,
-                max_tokens=1500
-            )
-            
-            try:
-                parsed = json.loads(raw_output)
-                return {
-                    "candidate_name": candidate_name,
-                    "job_title": job_title,
-                    "skill_gaps": skill_gaps,
-                    "matching_skills": matching_skills,
-                    "questions": parsed,
-                    "generated_by_ai": True,
-                    "provider": self.provider.name
-                }
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse AI response, using fallback")
-                return self._generate_fallback_questions(
-                    candidate_name, candidate_skills, job_title,
-                    job_required_skills, skill_gaps, matching_skills
-                )
-        except Exception as e:
-            logger.error(f"Error generating interview questions: {e}")
-            return self._generate_fallback_questions(
-                candidate_name, candidate_skills, job_title,
-                job_required_skills, skill_gaps, matching_skills
-            )
-    
-    def _generate_fallback_questions(
-        self,
-        candidate_name: str,
-        candidate_skills: list[str],
-        job_title: str,
-        job_required_skills: list[str],
-        skill_gaps: list[str],
-        matching_skills: list[str]
-    ) -> dict:
-        """Generate predefined questions as fallback when AI is unavailable."""
-        technical_questions = []
-        gap_questions = []
-        
-        # Generate questions based on matching skills
-        for skill in matching_skills[:3]:
-            technical_questions.append(
-                f"Cuéntame sobre tu experiencia trabajando con {skill}. ¿Qué proyectos has desarrollado?"
-            )
-        
-        # Generate questions based on skill gaps
-        for gap in skill_gaps[:3]:
-            gap_questions.append(
-                f"Veo que {gap} es un requisito para este puesto. ¿Has tenido alguna exposición a esta tecnología? ¿Cómo abordarías aprenderla?"
-            )
-        
-        # Add generic technical question if needed
-        if not technical_questions:
-            technical_questions.append(
-                f"¿Cuáles son las tecnologías que más dominas para el puesto de {job_title}?"
-            )
-        
-        return {
-            "candidate_name": candidate_name,
-            "job_title": job_title,
-            "skill_gaps": skill_gaps,
-            "matching_skills": matching_skills,
-            "questions": {
-                "technical_questions": technical_questions + [
-                    "Describe un problema técnico complejo que hayas resuelto recientemente.",
-                    "¿Cómo te mantienes actualizado con las nuevas tecnologías?"
-                ],
-                "gap_questions": gap_questions if gap_questions else [
-                    "¿Hay alguna área técnica donde te gustaría crecer profesionalmente?",
-                    "¿Cómo abordarías aprender una tecnología nueva que el equipo usa?"
-                ],
-                "behavioral_questions": [
-                    "Cuéntame sobre una situación donde tuviste que trabajar bajo presión. ¿Cómo la manejaste?",
-                    "Describe una ocasión donde tuviste un desacuerdo con un compañero. ¿Cómo lo resolviste?"
-                ],
-                "situational_questions": [
-                    f"Imagina que eres el {job_title} y tienes un deadline de 2 días para una feature crítica. ¿Cómo priorizarías tu trabajo?",
-                    "Si detectas un bug en producción justo antes de irte, ¿qué harías?"
-                ]
-            },
-            "generated_by_ai": False
-        }
 

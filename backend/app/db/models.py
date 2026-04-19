@@ -39,6 +39,7 @@ class CandidateDB(Base):
         nullable=True,
         index=True
     )
+    idiomas: Mapped[Optional[List[dict]]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -104,6 +105,7 @@ class JobProfileDB(Base):
     education_level: Mapped[Optional[str]] = mapped_column(String(50))
     status: Mapped[str] = mapped_column(String(20), default="active")
     scoring_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    required_languages: Mapped[Optional[List[dict]]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -189,10 +191,12 @@ class MatchResultDB(Base):
     experience_score: Mapped[Optional[float]] = mapped_column(Float)
     education_score: Mapped[Optional[float]] = mapped_column(Float)
     skills_score: Mapped[Optional[float]] = mapped_column(Float)
+    relevant_experience_years: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     recommendation: Mapped[Optional[str]] = mapped_column(String(50))
     explanation: Mapped[Optional[str]] = mapped_column(Text)
     missing_skills: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
     bonus_skills: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    guia_entrevista: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     scored_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 

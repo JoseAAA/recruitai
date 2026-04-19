@@ -64,20 +64,41 @@ class ExperienciaProfesional(BaseModel):
 class EducacionProfesional(BaseModel):
     institucion: str = ""
     titulo: str = ""
-    anio_egreso: Optional[str] = None
     tipo: str = "educacion"
+    fecha_inicio: Optional[str] = None
+    fecha_fin: Optional[str] = None
+    anio_egreso: Optional[str] = None   # campo legacy — se mantiene para compatibilidad
 
-    @field_validator("institucion", "titulo", "tipo", mode="before")
+    @field_validator("institucion", "titulo", mode="before")
     @classmethod
     def _none_to_empty(cls, v):
         return v if v is not None else ""
 
-    @field_validator("anio_egreso", mode="before")
+    @field_validator("tipo", mode="before")
     @classmethod
-    def _anio_to_str(cls, v):
+    def _normalize_tipo(cls, v):
+        if not v or not isinstance(v, str):
+            return "educacion"
+        v = v.strip().lower()
+        return "certificacion" if v == "certificacion" else "educacion"
+
+    @field_validator("fecha_inicio", "fecha_fin", "anio_egreso", mode="before")
+    @classmethod
+    def _date_to_str(cls, v):
         if v is None:
             return None
         return str(v)
+
+
+class IdiomaCandidato(BaseModel):
+    idioma: str = ""
+    nivel: str = ""
+    certificacion: Optional[str] = None
+
+    @field_validator("idioma", "nivel", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v):
+        return v if v is not None else ""
 
 
 class DatosPersonales(BaseModel):
@@ -85,6 +106,7 @@ class DatosPersonales(BaseModel):
     telefono: Optional[str] = None
     email: Optional[str] = None
     linkedin: Optional[str] = None
+    github: Optional[str] = None
 
     @field_validator("nombre_completo", mode="before")
     @classmethod
@@ -225,8 +247,21 @@ class ExtractedResume(BaseModel):
     """Schema for LLM-extracted resume data, EXACTLY matching user's Spanish template"""
     datos_personales: DatosPersonales
     habilidades: List[str] = Field(default_factory=list)
+    idiomas: List[IdiomaCandidato] = Field(default_factory=list)
     experiencia_profesional: List[ExperienciaProfesional] = Field(default_factory=list)
     educacion: List[EducacionProfesional] = Field(default_factory=list)
+
+
+class IdiomaRequerido(BaseModel):
+    """A language requirement in a job profile."""
+    idioma: str = ""
+    nivel: str = ""         # Básico, Intermedio, Avanzado, Nativo, Bilingüe
+    obligatorio: bool = True  # True = required, False = nice-to-have
+
+    @field_validator("idioma", "nivel", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v):
+        return v if v is not None else ""
 
 
 class ExtractedJobProfile(BaseModel):
@@ -243,3 +278,7 @@ class ExtractedJobProfile(BaseModel):
     key_objectives: List[str] = Field(default_factory=list, description="Objetivos clave o KPIs que el puesto debe lograr en los primeros 6-12 meses (3-5 items)")
     min_experience_years: int = Field(default=0, description="Años mínimos de experiencia requeridos (solo el número)")
     education_level: Optional[str] = Field(default=None, description="Nivel de educación formal requerido")
+    required_languages: List[IdiomaRequerido] = Field(
+        default_factory=list,
+        description="Idiomas requeridos o deseables para el puesto (ej. Inglés Avanzado obligatorio)"
+    )

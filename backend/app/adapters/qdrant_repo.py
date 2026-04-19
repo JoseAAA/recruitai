@@ -8,7 +8,11 @@ from uuid import UUID
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
-from qdrant_client.http.models import Distance, VectorParams
+from qdrant_client.http.models import (
+    Distance, VectorParams,
+    HnswConfigDiff, ScalarQuantizationConfig, ScalarType, QuantizationConfig,
+    SearchParams,
+)
 
 from app.core.config import settings
 
@@ -39,20 +43,43 @@ class QdrantRepository:
         collection_names = [c.name for c in collections]
         
         if self.COLLECTION_NAME not in collection_names:
-            # Create collection with named vectors
+            # Create collection with named vectors + optimized HNSW config.
+            # HNSW params based on Qdrant benchmark recommendations for
+            # high-precision top-K retrieval (precision > recall tradeoff):
+            # - m=16: edges per node, default is fine for this scale
+            # - ef_construct=200: higher quality index (default 100), ~2x build time
+            #   but significantly better recall at top-20
+            # Ref: Qdrant HNSW docs, "Efficient and robust approximate nearest neighbor
+            # search using Hierarchical Navigable Small World graphs" (Malkov & Yashunin, 2018)
+            hnsw_config = HnswConfigDiff(m=16, ef_construct=200)
+
+            # Scalar quantization: compresses 768-dim float32 vectors to int8.
+            # 4x memory reduction with <1% quality loss for nomic-embed-text.
+            # Ref: Qdrant quantization docs; "Product Quantization for Nearest Neighbor Search"
+            # (Jégou et al., 2011)
+            quantization_config = QuantizationConfig(
+                scalar=ScalarQuantizationConfig(
+                    type=ScalarType.INT8,
+                    quantile=0.99,  # preserve 99th percentile range (avoids outlier clipping)
+                    always_ram=True,  # keep quantized index in RAM for speed
+                )
+            )
+
             vectors_config = {
                 name: VectorParams(
                     size=self.VECTOR_SIZE,
-                    distance=Distance.COSINE
+                    distance=Distance.COSINE,
+                    hnsw_config=hnsw_config,
                 )
                 for name in self.VECTOR_NAMES
             }
-            
+
             self.client.create_collection(
                 collection_name=self.COLLECTION_NAME,
                 vectors_config=vectors_config,
+                quantization_config=quantization_config,
             )
-            logger.info(f"Created Qdrant collection: {self.COLLECTION_NAME}")
+            logger.info(f"Created Qdrant collection: {self.COLLECTION_NAME} (HNSW ef_construct=200, INT8 quantization)")
     
     async def upsert_candidate(
         self,
@@ -148,12 +175,19 @@ class QdrantRepository:
                 "summary": 0.10
             }
         
-        # Prefetch from each vector
+        # Prefetch from each vector.
+        # Overfetch 3x (not 2x) so RRF fusion has a wider candidate pool to rerank.
+        # Ref: "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning
+        # Methods" (Cormack et al., 2009) — fusion quality improves with larger input lists.
+        # hnsw_ef=128: at query time, HNSW explores 128 candidates per hop.
+        # Higher ef = better precision at top-K, modest latency cost.
+        # Qdrant recommends ef >= 2*limit for reliable top-K recall.
         prefetch_queries = [
             qmodels.Prefetch(
                 query=query_vectors.get(name, [0.0] * self.VECTOR_SIZE),
                 using=name,
-                limit=limit * 2  # Overfetch for better fusion
+                limit=limit * 3,  # 3x overfetch for better RRF fusion pool
+                params=SearchParams(hnsw_ef=max(128, limit * 4)),
             )
             for name in self.VECTOR_NAMES
             if name in query_vectors

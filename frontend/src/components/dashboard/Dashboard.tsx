@@ -2,25 +2,17 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { statsApi, DashboardStats, api } from "@/lib/api";
-
-// ── Helpers ──────────────────────────────────────────────
-const STATUS_LABELS: Record<string, string> = {
-    new: "Nuevos",
-    screening: "En Revisión",
-    interview: "Entrevista",
-    offer: "Oferta",
-    hired: "Contratados",
-    rejected: "Descartados",
-};
+import { statsApi, DashboardStats, TopMatchesResponse, api } from "@/lib/api";
+import { STATUS_LABELS } from "@/lib/export";
 
 const STATUS_DOT: Record<string, string> = {
-    new: "bg-slate-400",
-    screening: "bg-indigo-400",
-    interview: "bg-amber-400",
-    offer: "bg-emerald-400",
-    hired: "bg-primary",
-    rejected: "bg-red-400",
+    new:        "bg-slate-400",
+    screening:  "bg-slate-400",
+    shortlisted:"bg-primary",
+    interview:  "bg-primary",
+    offer:      "bg-emerald-500",
+    hired:      "bg-emerald-500",
+    rejected:   "bg-red-400",
 };
 
 function timeAgo(dateStr: string | null): string {
@@ -40,6 +32,7 @@ const Dashboard = () => {
     const [stats, setStats] = useState<DashboardStats | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [topMatches, setTopMatches] = useState<TopMatchesResponse | null>(null);
 
     useEffect(() => {
         statsApi
@@ -47,6 +40,12 @@ const Dashboard = () => {
             .then((res) => setStats(res.data))
             .catch(() => setError("No se pudo conectar con el servidor"))
             .finally(() => setLoading(false));
+
+        // Load top matches independently so it doesn't block the main dashboard
+        statsApi
+            .topMatches()
+            .then((res) => setTopMatches(res.data))
+            .catch(() => null); // Non-critical — fail silently
     }, []);
 
     if (loading) {
@@ -90,43 +89,18 @@ const Dashboard = () => {
             </div>
 
             {/* ── KPI Strip ── */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-                <KpiCard
-                    icon="group"
-                    iconBg="bg-blue-500/10"
-                    iconColor="text-blue-500"
-                    label="Candidatos"
-                    value={stats.total_candidates}
-                />
-                <KpiCard
-                    icon="work"
-                    iconBg="bg-emerald-500/10"
-                    iconColor="text-emerald-500"
-                    label="Vacantes Activas"
-                    value={stats.active_jobs}
-                />
-                <KpiCard
-                    icon="rate_review"
-                    iconBg="bg-amber-500/10"
-                    iconColor="text-amber-500"
-                    label="Pendientes de Revisión"
-                    value={pendingReview}
-                    alert={pendingReview > 0}
-                />
-                <KpiCard
-                    icon="check_circle"
-                    iconBg="bg-primary/10"
-                    iconColor="text-primary"
-                    label="Contratados"
-                    value={hired}
-                />
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                <KpiCard icon="group"        iconBg="bg-slate-100 dark:bg-slate-700/60"   iconColor="text-slate-500 dark:text-slate-400"   accentBar="bg-slate-400"    label="Candidatos"            value={stats.total_candidates} />
+                <KpiCard icon="work"         iconBg="bg-primary/10"                        iconColor="text-primary"                          accentBar="bg-primary"      label="Vacantes Activas"      value={stats.active_jobs} />
+                <KpiCard icon="rate_review"  iconBg="bg-amber-100 dark:bg-amber-500/20"   iconColor="text-amber-600 dark:text-amber-400"   accentBar="bg-amber-500"    label="Pendientes de Revisión" value={pendingReview} alert={pendingReview > 0} />
+                <KpiCard icon="check_circle" iconBg="bg-emerald-100 dark:bg-emerald-500/20" iconColor="text-emerald-600 dark:text-emerald-400" accentBar="bg-emerald-500" label="Contratados"          value={hired} />
             </div>
 
             {/* ── Main Content: Two Columns ── */}
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mb-6">
 
-                {/* LEFT: Activiy Feed (3 cols) */}
-                <div className="lg:col-span-3 bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+                {/* LEFT: Activity Feed (3 cols) */}
+                <div className="lg:col-span-3 bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl p-5 shadow-sm">
                     <div className="flex items-center justify-between mb-4">
                         <div>
                             <h2 className="text-base font-bold text-slate-900 dark:text-white">
@@ -198,7 +172,7 @@ const Dashboard = () => {
                 {/* RIGHT: Quick Status + Actions (2 cols) */}
                 <div className="lg:col-span-2 space-y-4">
                     {/* Pipeline Summary */}
-                    <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+                    <div className="bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl p-5 shadow-sm">
                         <h2 className="text-base font-bold text-slate-900 dark:text-white mb-3">
                             Estado del Pipeline
                         </h2>
@@ -228,7 +202,7 @@ const Dashboard = () => {
                     </div>
 
                     {/* Recent Jobs */}
-                    <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+                    <div className="bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl p-5 shadow-sm">
                         <div className="flex items-center justify-between mb-3">
                             <h2 className="text-base font-bold text-slate-900 dark:text-white">
                                 Convocatorias
@@ -280,29 +254,91 @@ const Dashboard = () => {
                 </div>
             </div>
 
+            {/* ── Top Matches ── */}
+            {topMatches && (topMatches.star_candidates.length > 0 || topMatches.top_candidates.length > 0) && (
+                <div className="mb-6 bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl p-5 shadow-sm">
+                    <div className="flex items-center justify-between mb-4">
+                        <div>
+                            <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                <span className="material-symbols-outlined text-amber-500 text-[20px]">auto_awesome</span>
+                                Candidatos Destacados
+                            </h2>
+                            <p className="text-xs text-slate-400">
+                                Mejores matches entre CVs y vacantes activas
+                                {topMatches.total_pending_review > 0 && (
+                                    <span className="ml-2 px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-500 font-medium">
+                                        {topMatches.total_pending_review} pendientes
+                                    </span>
+                                )}
+                            </p>
+                        </div>
+                        <Link href="/candidates" className="text-xs text-primary hover:underline font-medium flex items-center gap-1">
+                            Ver todos
+                            <span className="material-symbols-outlined text-[14px]">arrow_forward</span>
+                        </Link>
+                    </div>
+
+                    {/* Star candidates alert strip */}
+                    {topMatches.star_candidates.length > 0 && (
+                        <div className="mb-3 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200/60 dark:border-amber-700/30">
+                            <p className="text-xs font-semibold text-amber-600 dark:text-amber-400 mb-2 flex items-center gap-1">
+                                <span className="material-symbols-outlined text-[16px]">star</span>
+                                Candidatos estrella (&gt;85% compatibilidad)
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                                {topMatches.star_candidates.slice(0, 3).map((m) => (
+                                    <Link
+                                        key={`${m.candidate_id}-${m.job_id}`}
+                                        href={`/candidates/${m.candidate_id}`}
+                                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-700/40 hover:border-amber-400 transition-colors"
+                                    >
+                                        <span className="text-sm font-medium text-slate-800 dark:text-slate-200">{m.candidate_name}</span>
+                                        <span className="text-xs text-slate-500">·</span>
+                                        <span className="text-xs text-slate-500 truncate max-w-[120px]">{m.job_title}</span>
+                                        <span className="ml-1 px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 text-xs font-bold">
+                                            {m.match_score}%
+                                        </span>
+                                    </Link>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Top 5 overall */}
+                    <div className="divide-y divide-slate-100 dark:divide-slate-700/50">
+                        {topMatches.top_candidates.slice(0, 5).map((m) => {
+                            const scoreColor =
+                                m.match_score >= 85 ? "text-emerald-500" :
+                                m.match_score >= 70 ? "text-blue-500" :
+                                m.match_score >= 50 ? "text-amber-500" : "text-slate-400";
+                            const barColor =
+                                m.match_score >= 85 ? "bg-emerald-500" :
+                                m.match_score >= 70 ? "bg-blue-500" :
+                                m.match_score >= 50 ? "bg-amber-500" : "bg-slate-400";
+                            return (
+                                <div key={`${m.candidate_id}-${m.job_id}`} className="flex items-center gap-3 py-2.5">
+                                    <Link href={`/candidates/${m.candidate_id}`} className="flex-1 min-w-0 hover:underline">
+                                        <p className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{m.candidate_name}</p>
+                                        <p className="text-xs text-slate-400 truncate">{m.job_title}</p>
+                                    </Link>
+                                    <div className="flex items-center gap-2 flex-shrink-0">
+                                        <div className="w-24 h-1.5 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
+                                            <div className={`h-full rounded-full ${barColor}`} style={{ width: `${m.match_score}%` }} />
+                                        </div>
+                                        <span className={`text-sm font-bold w-10 text-right ${scoreColor}`}>{m.match_score}%</span>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
             {/* ── Quick Actions — minimal row ── */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <QuickAction
-                    href="/jobs"
-                    icon="add_circle"
-                    iconColor="text-primary"
-                    iconBg="bg-primary/10"
-                    label="Nueva Convocatoria"
-                />
-                <QuickAction
-                    href="/data"
-                    icon="upload_file"
-                    iconColor="text-emerald-500"
-                    iconBg="bg-emerald-500/10"
-                    label="Importar CVs"
-                />
-                <QuickAction
-                    href="/analytics"
-                    icon="insights"
-                    iconColor="text-amber-500"
-                    iconBg="bg-amber-500/10"
-                    label="Ver Analítica"
-                />
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <QuickAction href="/jobs"      icon="add_circle"  iconColor="text-primary"  iconBg="bg-primary/10"  label="Nueva Convocatoria" />
+                <QuickAction href="/data"      icon="upload_file" iconColor="text-primary"  iconBg="bg-primary/10"  label="Importar CVs" />
+                <QuickAction href="/analytics" icon="insights"    iconColor="text-primary"  iconBg="bg-primary/10"  label="Ver Analítica" />
             </div>
         </>
     );
@@ -314,6 +350,7 @@ function KpiCard({
     icon,
     iconBg,
     iconColor,
+    accentBar,
     label,
     value,
     alert = false,
@@ -321,29 +358,28 @@ function KpiCard({
     icon: string;
     iconBg: string;
     iconColor: string;
+    accentBar: string;
     label: string;
     value: number;
     alert?: boolean;
 }) {
     return (
-        <div
-            className={`p-4 rounded-xl bg-white dark:bg-slate-800/50 border shadow-sm ${
-                alert
-                    ? "border-amber-400/50 dark:border-amber-500/30"
-                    : "border-slate-200 dark:border-slate-700"
-            }`}
-        >
-            <div className="flex items-center gap-3">
-                <div className={`p-2 rounded-lg ${iconBg} flex-shrink-0`}>
-                    <span className={`material-symbols-outlined ${iconColor} text-[22px]`}>
+        <div className={`relative overflow-hidden rounded-2xl bg-white dark:bg-slate-800/60 border shadow-sm hover:shadow-md transition-shadow ${
+            alert ? "border-amber-300 dark:border-amber-500/40" : "border-slate-200 dark:border-slate-700"
+        }`}>
+            {/* Colored top accent bar */}
+            <div className={`h-1 w-full ${accentBar}`} />
+            <div className="p-5 flex items-center gap-4">
+                <div className={`p-3 rounded-xl ${iconBg} flex-shrink-0`}>
+                    <span className={`material-symbols-outlined fill ${iconColor} text-[24px]`}>
                         {icon}
                     </span>
                 </div>
                 <div>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
+                    <p className="text-xs text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wide">
                         {label}
                     </p>
-                    <p className="text-xl font-bold text-slate-900 dark:text-white">
+                    <p className="text-3xl font-black text-slate-900 dark:text-white leading-none mt-1">
                         {value}
                     </p>
                 </div>
@@ -368,14 +404,14 @@ function QuickAction({
     return (
         <Link
             href={href}
-            className="flex items-center gap-3 p-3.5 rounded-xl bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 shadow-sm hover:shadow-md hover:border-slate-300 dark:hover:border-slate-600 transition-all group"
+            className="flex items-center gap-3 p-4 rounded-2xl bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 shadow-sm hover:shadow-md hover:border-slate-300 dark:hover:border-slate-600 transition-all group"
         >
-            <div className={`p-2 rounded-lg ${iconBg} group-hover:scale-110 transition-transform flex-shrink-0`}>
-                <span className={`material-symbols-outlined ${iconColor} text-[20px]`}>
+            <div className={`p-2.5 rounded-xl ${iconBg} group-hover:scale-110 transition-transform flex-shrink-0`}>
+                <span className={`material-symbols-outlined fill ${iconColor} text-[22px]`}>
                     {icon}
                 </span>
             </div>
-            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+            <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
                 {label}
             </span>
         </Link>

@@ -8,7 +8,7 @@ import Header from "./Header";
 export function DashboardLayout({ children }: { children: ReactNode }) {
     return (
         <ProtectedRoute>
-            <div className="flex h-screen w-full bg-slate-50 dark:bg-[#0f172a] text-slate-900 dark:text-white">
+            <div className="flex h-screen w-full bg-slate-100 dark:bg-[#0f172a] text-slate-900 dark:text-white">
                 <Sidebar />
                 <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
                     <Header />

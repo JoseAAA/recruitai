@@ -159,7 +159,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_name='candidates' AND column_name='job_id') THEN
         ALTER TABLE candidates ADD COLUMN job_id UUID REFERENCES job_profiles(id) ON DELETE CASCADE;
-        CREATE INDEX idx_candidates_job_id ON candidates(job_id);
+        CREATE INDEX IF NOT EXISTS idx_candidates_job_id ON candidates(job_id);
     END IF;
 END $$;
 
@@ -266,5 +266,50 @@ BEGIN
         ALTER TABLE match_results ADD COLUMN recommendation VARCHAR(50);
         ALTER TABLE match_results ADD COLUMN candidate_name VARCHAR(255);
         ALTER TABLE match_results ADD COLUMN scored_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+    END IF;
+END $$;
+
+-- Migration: Add linkedin to candidates
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidates' AND column_name='linkedin') THEN
+        ALTER TABLE candidates ADD COLUMN linkedin VARCHAR(500);
+    END IF;
+END $$;
+
+-- Migration: Add education_type to education_entries
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='education_entries' AND column_name='education_type') THEN
+        ALTER TABLE education_entries ADD COLUMN education_type VARCHAR(50) DEFAULT 'educacion';
+    END IF;
+END $$;
+
+-- Migration: Add required_languages to job_profiles
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='job_profiles' AND column_name='required_languages') THEN
+        ALTER TABLE job_profiles ADD COLUMN required_languages JSONB DEFAULT '[]'::jsonb;
+    END IF;
+END $$;
+
+-- Migration: Add guia_entrevista to match_results
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='match_results' AND column_name='guia_entrevista') THEN
+        ALTER TABLE match_results ADD COLUMN guia_entrevista JSONB;
+    END IF;
+END $$;
+
+-- Migration: Add idiomas to candidates
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='candidates' AND column_name='idiomas') THEN
+        ALTER TABLE candidates ADD COLUMN idiomas JSONB DEFAULT '[]'::jsonb;
     END IF;
 END $$;

@@ -9,11 +9,54 @@ export const api = axios.create({
     },
 });
 
+// Always inject the JWT token from localStorage so it survives page refreshes,
+// React effect ordering races, and auth-context resets.
+// Also remove the default Content-Type header for FormData requests so the
+// browser can set multipart/form-data with the correct boundary automatically.
+// Without this, the instance-level "application/json" header overrides the
+// multipart header and FastAPI receives file=None / form=None → HTTP 400.
+api.interceptors.request.use((config) => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    if (token) {
+        config.headers["Authorization"] = `Bearer ${token}`;
+    }
+    // Axios v1.x uses AxiosHeaders (not a plain object).
+    // The correct API to remove a header is .delete(), not the JS delete operator.
+    // Without this, Content-Type: application/json is sent even for FormData,
+    // and FastAPI cannot parse the multipart body → file=None → HTTP 400.
+    if (config.data instanceof FormData) {
+        config.headers.delete("Content-Type");
+    }
+    return config;
+});
+
+// Global 401 handler — when the session expires, redirect to login with a
+// clear message instead of showing a cryptic "No se pudieron validar las
+// credenciales" error inside the page that triggered the call.
+// Excluded: the login endpoint itself (a wrong password returns 401 too).
+api.interceptors.response.use(
+    (response) => response,
+    (error) => {
+        const isAuthEndpoint = error.config?.url?.includes("/auth/login");
+        if (error.response?.status === 401 && !isAuthEndpoint && typeof window !== "undefined") {
+            localStorage.removeItem("token");
+            window.location.href = "/login?session=expired";
+        }
+        return Promise.reject(error);
+    }
+);
+
 // Types
 export interface ScoringDimension {
     dimension: string;
     weight: number;
     description?: string;
+}
+
+export interface LanguageRequirement {
+    idioma: string;
+    nivel: string;
+    obligatorio: boolean;
 }
 
 export interface Candidate {
@@ -44,6 +87,11 @@ export interface CandidateDetail extends Candidate {
         field_of_study?: string;
         education_type?: string; // "educacion" | "certificacion"
     }>;
+    idiomas?: Array<{
+        idioma: string;
+        nivel: string;
+        certificacion?: string | null;
+    }>;
     raw_text?: string;
 }
 
@@ -63,8 +111,14 @@ export interface JobProfile {
     min_experience_years: number;
     education_level?: string;
     status: string;
+    required_languages?: LanguageRequirement[];
     scoring_config?: ScoringDimension[];
     candidate_count?: number;
+}
+
+export interface InterviewQuestion {
+    tipo: "validar_logro" | "explorar_brecha" | "validar_inferencia";
+    pregunta: string;
 }
 
 export interface MatchResult {
@@ -79,6 +133,8 @@ export interface MatchResult {
     recommendation: string; // "Altamente recomendado" | "Buena opción" | "Considerar" | "No recomendado"
     missing_skills: string[];
     bonus_skills: string[];
+    relevant_experience_years?: number | null; // LLM: years in roles relevant to this job
+    guia_entrevista?: InterviewQuestion[];
     scored_at?: string;
 }
 
@@ -114,7 +170,6 @@ export const candidatesApi = {
         formData.append("file", file);
         if (jobId) formData.append("job_id", jobId);
         return api.post<UploadResponse>("/candidates/upload", formData, {
-            headers: { "Content-Type": "multipart/form-data" },
             timeout: 120000, // 2 minutes per file — LLM extraction is slow on CPU
         });
     },
@@ -171,10 +226,10 @@ export const jobsApi = {
 
     get: (id: string) => api.get<JobProfile>(`/jobs/${id}`),
 
-    create: (data: Partial<JobProfile> & { scoring_config?: ScoringDimension[] }) =>
+    create: (data: Partial<JobProfile> & { scoring_config?: ScoringDimension[]; required_languages?: LanguageRequirement[] }) =>
         api.post<JobProfile>("/jobs", data),
 
-    update: (id: string, data: Partial<JobProfile> & { scoring_config?: ScoringDimension[] }) =>
+    update: (id: string, data: Partial<JobProfile> & { scoring_config?: ScoringDimension[]; required_languages?: LanguageRequirement[] }) =>
         api.put<JobProfile>(`/jobs/${id}`, data),
 
     delete: (id: string) => api.delete(`/jobs/${id}`),
@@ -186,9 +241,9 @@ export const jobsApi = {
         const formData = new FormData();
         if (file) formData.append("file", file);
         if (text) formData.append("description_text", text);
-        return api.post("/jobs/analyze", formData, {
-            headers: { "Content-Type": "multipart/form-data" },
-        });
+        // Pass headers:{} so axios merges an empty object — combined with the
+        // interceptor this guarantees Content-Type is never application/json.
+        return api.post("/jobs/analyze", formData, { headers: {} });
     },
 
     getScoringPresets: () =>
@@ -250,10 +305,40 @@ export interface DashboardStats {
     }>;
 }
 
+export interface TopCandidateMatch {
+    candidate_id: string;
+    candidate_name: string;
+    job_id: string;
+    job_title: string;
+    match_score: number;
+    skills_match: string[];
+    missing_skills: string[];
+    recommendation: string;
+}
+
+export interface TopMatchesResponse {
+    top_candidates: TopCandidateMatch[];
+    jobs_with_matches: Array<{
+        job_id: string;
+        job_title: string;
+        required_skills: string[];
+        top_candidates: Array<{
+            candidate_id: string;
+            candidate_name: string;
+            match_score: number;
+            recommendation: string;
+        }>;
+    }>;
+    star_candidates: TopCandidateMatch[];
+    total_pending_review: number;
+}
+
 export const statsApi = {
     dashboard: () => api.get<DashboardStats>("/stats/dashboard"),
     quick: () => api.get<{ candidates: number; jobs: number; new_this_week: number }>("/stats/quick"),
+    topMatches: () => api.get<TopMatchesResponse>("/stats/top-matches"),
 };
+
 
 // Candidate notes types
 export interface CandidateNote {
@@ -287,60 +372,4 @@ export const notesApi = {
 
     updateStatus: (candidateId: string, status: string, reason?: string) =>
         api.patch(`/candidates/${candidateId}/status`, { status }),
-};
-
-// Cloud Sync types
-export interface CloudConnectionStatus {
-    configured: boolean;
-    redirect_uri: string;
-}
-
-export interface CloudAuthResponse {
-    auth_url: string;
-    message: string;
-}
-
-export interface CloudFolder {
-    id: string;
-    name: string;
-    path: string;
-}
-
-export interface CloudConnection {
-    id: string;
-    provider: string;
-    folder_path: string | null;
-    is_active: boolean;
-    last_sync: string | null;
-    created_at: string;
-}
-
-export interface CloudSyncResult {
-    status: string;
-    folder_path: string;
-    files_found: number;
-    files: { id: string; name: string; size: number; modified: string }[];
-    last_sync: string;
-}
-
-export const cloudApi = {
-    // OneDrive
-    getOneDriveStatus: () =>
-        api.get<CloudConnectionStatus>("/cloud/onedrive/status"),
-
-    getOneDriveAuthUrl: (userId: string) =>
-        api.get<CloudAuthResponse>(`/cloud/onedrive/auth?user_id=${userId}`),
-
-    listOneDriveFolders: (userId: string, path: string = "root") =>
-        api.get<{ path: string; folders: CloudFolder[] }>(`/cloud/onedrive/folders?user_id=${userId}&path=${encodeURIComponent(path)}`),
-
-    syncOneDrive: (userId: string, folderPath: string) =>
-        api.post<CloudSyncResult>(`/cloud/onedrive/sync?user_id=${userId}`, { folder_path: folderPath }),
-
-    disconnectOneDrive: (userId: string) =>
-        api.delete(`/cloud/onedrive/disconnect?user_id=${userId}`),
-
-    // Get all connections for a user
-    listConnections: (userId: string) =>
-        api.get<{ connections: CloudConnection[] }>(`/cloud/connections?user_id=${userId}`),
 };

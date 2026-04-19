@@ -1,16 +1,18 @@
 """
 Job Profile Management API Routes with PostgreSQL persistence
 """
+import asyncio
 import logging
 from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import DocumentExtractor, EmbeddingService, LLMEngine
+from app.api.routes.auth import get_current_active_user, UserResponse
 from app.core.database import get_db
 from app.db.models import CandidateDB, JobProfileDB
 from app.domain import DEFAULT_SCORING_CONFIG, EducationLevel, JobStatus, ScoringDimension
@@ -43,6 +45,7 @@ class CreateJobRequest(BaseModel):
     min_experience_years: int = 0
     education_level: Optional[str] = None
     status: Optional[str] = "active"
+    required_languages: List[dict] = Field(default_factory=list)
     scoring_config: Optional[List[ScoringDimensionSchema]] = Field(
         default=None,
         description="Custom scoring weights per dimension. Null = use global defaults."
@@ -65,6 +68,7 @@ class JobProfileResponse(BaseModel):
     min_experience_years: int
     education_level: Optional[str]
     status: str
+    required_languages: List[dict] = Field(default_factory=list)
     scoring_config: Optional[List[dict]] = None
     candidate_count: int = 0
 
@@ -90,6 +94,7 @@ class ExtractedSkillsResponse(BaseModel):
     key_objectives: List[str] = Field(default_factory=list)
     min_experience_years: int
     education_level: Optional[str]
+    required_languages: List[dict] = Field(default_factory=list)
     raw_description: str
 
 
@@ -123,7 +128,9 @@ def _validate_scoring_config(scoring_config: Optional[List[ScoringDimensionSchem
 
 
 @router.get("/scoring-presets")
-async def get_scoring_presets():
+async def get_scoring_presets(
+    current_user: UserResponse = Depends(get_current_active_user),
+):
     """Return the default scoring configuration preset."""
     return {
         "default": [d.model_dump() for d in DEFAULT_SCORING_CONFIG]
@@ -133,6 +140,7 @@ async def get_scoring_presets():
 @router.post("", response_model=JobProfileResponse, status_code=status.HTTP_201_CREATED)
 async def create_job_profile(
     request: CreateJobRequest,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new job profile and save to PostgreSQL."""
@@ -153,6 +161,7 @@ async def create_job_profile(
         min_experience_years=request.min_experience_years,
         education_level=request.education_level,
         status=request.status or "active",
+        required_languages=request.required_languages or [],
         scoring_config=scoring_config,
     )
 
@@ -161,10 +170,9 @@ async def create_job_profile(
     await db.refresh(job_db)
 
     # Count associated candidates
-    count_result = await db.execute(
-        select(CandidateDB.id).where(CandidateDB.job_id == job_db.id)
-    )
-    candidate_count = len(count_result.all())
+    candidate_count = (await db.execute(
+        select(func.count(CandidateDB.id)).where(CandidateDB.job_id == job_db.id)
+    )).scalar_one()
 
     return JobProfileResponse(
         id=job_db.id,
@@ -182,6 +190,7 @@ async def create_job_profile(
         min_experience_years=job_db.min_experience_years,
         education_level=job_db.education_level,
         status=job_db.status,
+        required_languages=job_db.required_languages or [],
         scoring_config=job_db.scoring_config,
         candidate_count=candidate_count,
     )
@@ -191,6 +200,7 @@ async def create_job_profile(
 async def analyze_job_description(
     file: UploadFile = File(None),
     description_text: Optional[str] = Form(None),
+    current_user: UserResponse = Depends(get_current_active_user),
     parser: DocumentExtractor = Depends(get_document_parser),
     llm: LLMEngine = Depends(get_llm_engine),
 ):
@@ -229,6 +239,7 @@ async def analyze_job_description(
             key_objectives=extracted.key_objectives,
             min_experience_years=extracted.min_experience_years,
             education_level=extracted.education_level,
+            required_languages=[l.model_dump() for l in extracted.required_languages],
             raw_description=text[:2000] if text else "",
         )
         
@@ -242,6 +253,7 @@ async def analyze_job_description(
 
 @router.get("", response_model=JobListResponse)
 async def list_jobs(
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
     status_filter: Optional[str] = Query(None, alias="status"),
 ):
@@ -281,6 +293,7 @@ async def list_jobs(
                 min_experience_years=j.min_experience_years,
                 education_level=j.education_level,
                 status=j.status,
+                required_languages=j.required_languages or [],
                 scoring_config=j.scoring_config,
                 candidate_count=counts_map.get(str(j.id), 0),
             )
@@ -293,6 +306,7 @@ async def list_jobs(
 @router.get("/{job_id}/scores")
 async def get_job_scores(
     job_id: UUID,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Return persisted AI match scores for all candidates of a job, sorted by overall score."""
@@ -319,6 +333,8 @@ async def get_job_scores(
                 "explanation": r.explanation or "",
                 "missing_skills": r.missing_skills or [],
                 "bonus_skills": r.bonus_skills or [],
+                "relevant_experience_years": r.relevant_experience_years,
+                "guia_entrevista": r.guia_entrevista or [],
                 "scored_at": r.scored_at.isoformat() if r.scored_at else None,
             }
             for r in rows
@@ -330,6 +346,7 @@ async def get_job_scores(
 @router.get("/{job_id}", response_model=JobProfileResponse)
 async def get_job(
     job_id: UUID,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get a job profile by ID from PostgreSQL."""
@@ -344,10 +361,9 @@ async def get_job(
             detail="Job profile not found"
         )
     
-    count_result = await db.execute(
-        select(CandidateDB.id).where(CandidateDB.job_id == job_id)
-    )
-    candidate_count = len(count_result.all())
+    candidate_count = (await db.execute(
+        select(func.count(CandidateDB.id)).where(CandidateDB.job_id == job_id)
+    )).scalar_one()
 
     return JobProfileResponse(
         id=job.id,
@@ -365,6 +381,7 @@ async def get_job(
         min_experience_years=job.min_experience_years,
         education_level=job.education_level,
         status=job.status,
+        required_languages=job.required_languages or [],
         scoring_config=job.scoring_config,
         candidate_count=candidate_count,
     )
@@ -374,6 +391,7 @@ async def get_job(
 async def update_job(
     job_id: UUID,
     request: CreateJobRequest,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Update a job profile in PostgreSQL."""
@@ -403,15 +421,15 @@ async def update_job(
     job.location = request.location
     job.min_experience_years = request.min_experience_years
     job.education_level = request.education_level
+    job.required_languages = request.required_languages or []
     job.scoring_config = scoring_config
 
     await db.commit()
     await db.refresh(job)
 
-    count_result = await db.execute(
-        select(CandidateDB.id).where(CandidateDB.job_id == job_id)
-    )
-    candidate_count = len(count_result.all())
+    candidate_count = (await db.execute(
+        select(func.count(CandidateDB.id)).where(CandidateDB.job_id == job_id)
+    )).scalar_one()
 
     return JobProfileResponse(
         id=job.id,
@@ -429,6 +447,7 @@ async def update_job(
         min_experience_years=job.min_experience_years,
         education_level=job.education_level,
         status=job.status,
+        required_languages=job.required_languages or [],
         scoring_config=job.scoring_config,
         candidate_count=candidate_count,
     )
@@ -437,6 +456,7 @@ async def update_job(
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_job(
     job_id: UUID,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a job profile and cascade-delete all its candidates (DB + Qdrant + MinIO)."""
@@ -457,13 +477,14 @@ async def delete_job(
     )
     candidate_ids = [row[0] for row in candidates_result.all()]
 
-    # Clean Qdrant vectors + MinIO CVs for each candidate
+    # Clean Qdrant vectors + MinIO CVs for each candidate (parallel)
     if candidate_ids:
         from app.adapters.qdrant_repo import QdrantRepository
         from app.adapters.storage import StorageService
         qdrant = QdrantRepository()
         storage = StorageService()
-        for cid in candidate_ids:
+
+        async def _delete_one(cid):
             try:
                 await qdrant.delete_candidate(cid)
             except Exception as e:
@@ -472,6 +493,8 @@ async def delete_job(
                 storage.delete_cv(str(cid))
             except Exception as e:
                 logger.warning(f"Could not delete MinIO CV for {cid}: {e}")
+
+        await asyncio.gather(*[_delete_one(cid) for cid in candidate_ids])
         logger.info(f"Cleaned {len(candidate_ids)} candidates (Qdrant + MinIO) for job {job_id}")
 
     # Explicitly delete candidate rows (FK may be SET NULL on existing DBs, not CASCADE)
@@ -489,6 +512,7 @@ async def delete_job(
 async def update_job_status(
     job_id: UUID,
     new_status: str,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Update job status in PostgreSQL."""

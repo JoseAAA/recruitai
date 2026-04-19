@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.routes.auth import get_current_active_user, UserResponse
 from app.core.database import get_db
 from app.db.models import CandidateDB, JobProfileDB
 
@@ -41,6 +42,7 @@ class QuickStats(BaseModel):
 
 @router.get("/dashboard", response_model=DashboardStats)
 async def get_dashboard_stats(
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -122,6 +124,7 @@ async def get_dashboard_stats(
 
 @router.get("/quick", response_model=QuickStats)
 async def get_quick_stats(
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get quick stats for header/navbar display."""
@@ -176,6 +179,7 @@ class TopMatchesResponse(BaseModel):
 
 @router.get("/top-matches", response_model=TopMatchesResponse)
 async def get_top_matches(
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
     """

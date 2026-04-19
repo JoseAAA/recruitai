@@ -53,9 +53,11 @@ RecruitAI implementa **5 capas de defensa** basadas en OWASP LLM Security Guidel
                            ▼
 ┌─────────────────────────────────────────────────────────┐
 │                  CAPA 5: OUTPUT SCAN                     │
-│     Detecta signos de compromiso en respuesta           │
+│     Detecta signos de compromiso en respuesta LLM       │
 │        - "my system prompt..."                          │
 │        - "I have been jailbroken..."                    │
+│     ❌ Bloqueante → PromptInjectionError                 │
+│     El resultado se descarta, nunca llega al usuario    │
 └─────────────────────────────────────────────────────────┘
 ```
 

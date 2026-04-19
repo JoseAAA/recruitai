@@ -10,11 +10,16 @@ services:
       - qdrant_data:/qdrant/storage
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
-      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=2   # Limita threads de búsqueda
+      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=2
       - QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS=1
     networks:
       - recruitai-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '00000000:18BD' /proc/net/tcp || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   # PostgreSQL for relational data
   postgres:
@@ -31,8 +36,9 @@ services:
       - ./infra/init-db.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - recruitai-network
+    restart: unless-stopped
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recruitai}" ]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recruitai}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -47,11 +53,18 @@ services:
       - ollama_data:/root/.ollama
     environment:
       - OLLAMA_FLASH_ATTENTION=1        # 20-40% faster attention on GPU
-      - OLLAMA_KEEP_ALIVE=10m           # Descarga el modelo tras 10 min sin uso (libera ~1.6GB RAM)
-      - OLLAMA_NUM_PARALLEL=1           # 1 request simultáneo (suficiente para uso individual)
+      - OLLAMA_KEEP_ALIVE=5m            # Descarga el modelo tras 5 min sin uso (libera ~5.5GB RAM)
+      - OLLAMA_NUM_PARALLEL=3           # 3 requests simultáneos (gemma3:4b cabe holgado en 6GB VRAM)
       - OLLAMA_MAX_LOADED_MODELS=2      # gemma3:4b + nomic-embed-text
     networks:
       - recruitai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':2CAA' /proc/net/tcp6 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     deploy:
       resources:
         reservations:
@@ -112,6 +125,12 @@ services:
     restart: unless-stopped
     networks:
       - recruitai-network
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\" || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # Next.js Frontend
   frontend:
@@ -131,6 +150,13 @@ services:
       - backend
     networks:
       - recruitai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 > /dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # Nginx Reverse Proxy
   nginx:
@@ -145,6 +171,12 @@ services:
       - frontend
     networks:
       - recruitai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
 volumes:
   qdrant_data:

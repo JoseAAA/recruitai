@@ -16,8 +16,14 @@ export default function RootLayout({
     children: React.ReactNode;
 }) {
     return (
-        <html lang="es" className="dark">
+        <html lang="es" suppressHydrationWarning>
             <head>
+                {/* Apply saved theme before React hydrates — prevents white flash */}
+                <script
+                    dangerouslySetInnerHTML={{
+                        __html: `try{var t=localStorage.getItem('theme');document.documentElement.classList.toggle('dark',t===null||t==='dark')}catch(e){}`,
+                    }}
+                />
                 {/* Preconnect for faster font loading */}
                 <link rel="preconnect" href="https://fonts.googleapis.com" />
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
@@ -27,7 +33,7 @@ export default function RootLayout({
                     rel="stylesheet"
                 />
             </head>
-            <body className={`${inter.className} bg-[#0f172a] text-white antialiased`}>
+            <body className={`${inter.className} antialiased`}>
                 <Providers>{children}</Providers>
             </body>
         </html>

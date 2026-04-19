@@ -5,17 +5,19 @@ import { statsApi, DashboardStats } from "@/lib/api";
 
 // ── Helpers ──────────────────────────────────────────────
 const STATUS_LABELS: Record<string, string> = {
-    new: "Nuevos",
-    screening: "Screening",
+    new: "Nuevo",
+    screening: "En Revisión",
+    shortlisted: "Preseleccionado",
     interview: "Entrevista",
     offer: "Oferta",
-    hired: "Contratados",
-    rejected: "Descartados",
+    hired: "Contratado",
+    rejected: "Descartado",
 };
 
 const STATUS_COLORS: Record<string, string> = {
     new: "bg-slate-400",
     screening: "bg-indigo-400",
+    shortlisted: "bg-violet-400",
     interview: "bg-amber-400",
     offer: "bg-emerald-400",
     hired: "bg-primary",
@@ -25,6 +27,7 @@ const STATUS_COLORS: Record<string, string> = {
 const STATUS_ICON: Record<string, string> = {
     new: "fiber_new",
     screening: "search",
+    shortlisted: "checklist",
     interview: "groups",
     offer: "handshake",
     hired: "check_circle",
@@ -79,7 +82,7 @@ const Analytics: React.FC = () => {
     }
 
     // Compute pipeline stages in order (only statuses that exist)
-    const pipelineOrder = ["new", "screening", "interview", "offer", "hired"];
+    const pipelineOrder = ["new", "screening", "shortlisted", "interview", "offer", "hired"];
     const pipeline = pipelineOrder
         .map((key) => ({
             key,

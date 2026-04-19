@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { jobsApi, searchApi, JobProfile, MatchResult } from "@/lib/api";
+import { scoreColor } from "@/lib/utils";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -64,13 +65,8 @@ function CandidateMatchCard({ match, index }: { match: MatchResult; index: numbe
     const score = Math.round(match.overall_score);
     const initials = match.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase();
 
-    const scoreColor =
-        score >= 75 ? "text-emerald-600" :
-        score >= 55 ? "text-blue-600" :
-        score >= 35 ? "text-amber-600" :
-        "text-slate-500";
-
-    const barColors = ["bg-primary", "bg-emerald-500", "bg-violet-500"];
+    const { text: scoreColorText } = scoreColor(score);
+    const barColors = ["bg-primary", "bg-emerald-500", "bg-blue-500"];
 
     return (
         <div className={`rounded-xl border ${meta.border} ${meta.bg} p-5 transition-all`}>
@@ -98,7 +94,7 @@ function CandidateMatchCard({ match, index }: { match: MatchResult; index: numbe
                         </div>
                         {/* Score circle */}
                         <div className="flex flex-col items-center flex-shrink-0">
-                            <span className={`text-3xl font-black ${scoreColor}`}>{score}</span>
+                            <span className={`text-3xl font-black ${scoreColorText}`}>{score}</span>
                             <span className="text-[10px] text-slate-400 uppercase tracking-wider">puntos</span>
                         </div>
                     </div>
@@ -228,6 +224,7 @@ const JobsList: React.FC = () => {
     const [jobs, setJobs] = useState<JobProfile[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [search, setSearch] = useState("");
     const [selectedJob, setSelectedJob] = useState<JobProfile | null>(null);
     const [matches, setMatches] = useState<MatchResult[]>([]);
     const [matchLoading, setMatchLoading] = useState(false);
@@ -286,6 +283,17 @@ const JobsList: React.FC = () => {
         );
     }
 
+    // Filter jobs by search term
+    const q = search.trim().toLowerCase();
+    const filteredJobs = q
+        ? jobs.filter(j =>
+            j.title.toLowerCase().includes(q) ||
+            (j.department ?? "").toLowerCase().includes(q) ||
+            (j.industry ?? "").toLowerCase().includes(q) ||
+            j.required_skills.some(s => s.toLowerCase().includes(q))
+          )
+        : jobs;
+
     // Summary for results
     const topCount = matches.filter(
         m => m.recommendation === "Altamente recomendado" || m.recommendation === "Buena opción"
@@ -300,16 +308,39 @@ const JobsList: React.FC = () => {
                         Perfiles de Puesto
                     </h1>
                     <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">
-                        {jobs.length} perfil(es) activo(s)
+                        {q
+                            ? `${filteredJobs.length} de ${jobs.length} perfil(es)`
+                            : `${jobs.length} perfil(es) activo(s)`}
                     </p>
                 </div>
-                <Link
-                    href="/jobs/new"
-                    className="flex items-center gap-2 px-4 py-2 bg-primary text-white font-medium rounded-lg hover:bg-blue-600 transition-colors shadow-sm shadow-blue-500/30"
-                >
-                    <span className="material-symbols-outlined text-[20px]">add</span>
-                    Nuevo Perfil
-                </Link>
+                <div className="flex items-center gap-3">
+                    {/* Search */}
+                    <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-400 text-[18px]">search</span>
+                        <input
+                            type="text"
+                            value={search}
+                            onChange={e => setSearch(e.target.value)}
+                            placeholder="Buscar por título, área o skill..."
+                            className="pl-9 pr-8 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-primary/40 focus:border-primary outline-none transition-all w-64"
+                        />
+                        {search && (
+                            <button
+                                onClick={() => setSearch("")}
+                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                            >
+                                <span className="material-symbols-outlined text-[16px]">close</span>
+                            </button>
+                        )}
+                    </div>
+                    <Link
+                        href="/jobs/new"
+                        className="flex items-center gap-2 px-4 py-2 bg-primary text-white font-medium rounded-lg hover:bg-blue-600 transition-colors shadow-sm shadow-blue-500/30 whitespace-nowrap"
+                    >
+                        <span className="material-symbols-outlined text-[20px]">add</span>
+                        Nuevo Perfil
+                    </Link>
+                </div>
             </div>
 
             {error && (
@@ -336,9 +367,17 @@ const JobsList: React.FC = () => {
                         Crear Perfil
                     </Link>
                 </div>
+            ) : filteredJobs.length === 0 ? (
+                <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-12 text-center">
+                    <span className="material-symbols-outlined text-[48px] text-slate-300 dark:text-slate-600 block mb-3">search_off</span>
+                    <p className="text-slate-500">No se encontraron perfiles que coincidan con <strong>"{search}"</strong></p>
+                    <button onClick={() => setSearch("")} className="mt-3 text-sm text-primary hover:underline">
+                        Limpiar búsqueda
+                    </button>
+                </div>
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-                    {jobs.map((job) => (
+                    {filteredJobs.map((job) => (
                         <div
                             key={job.id}
                             className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm hover:shadow-lg hover:border-primary/40 transition-all flex flex-col"

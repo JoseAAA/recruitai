@@ -52,7 +52,7 @@ class SystemSettingsResponse(BaseModel):
 
 DEFAULT_SETTINGS = {
     "llm_provider": ("ollama", "Proveedor de IA: ollama (local, GPU)"),
-    "ollama_model": ("gemma3:4b", "Modelo de extracción y matching (gemma3:4b recomendado)"),
+    "ollama_model": ("gemma4:e2b", "Modelo de extracción y matching (gemma4:e2b recomendado)"),
     "embedding_model": ("nomic-embed-text", "Modelo de embeddings para búsqueda semántica"),
     "ollama_host": ("http://ollama:11434", "URL del servidor Ollama"),
     "upload_dir": ("./uploads", "Directorio para archivos CV subidos"),

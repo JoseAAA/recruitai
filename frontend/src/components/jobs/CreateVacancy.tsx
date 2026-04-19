@@ -3,13 +3,42 @@
 import React, { useState, useRef, KeyboardEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useJobDescriptionGenerator } from "@/lib/ai";
-import { jobsApi, ScoringDimension } from "@/lib/api";
+import { jobsApi, ScoringDimension, LanguageRequirement } from "@/lib/api";
 
 const DEFAULT_SCORING: ScoringDimension[] = [
     { dimension: "skills", weight: 0.40, description: "Skills técnicos y blandos" },
     { dimension: "experience", weight: 0.35, description: "Experiencia laboral relevante" },
     { dimension: "education", weight: 0.25, description: "Formación académica" },
+];
+
+const SCORING_PRESETS = [
+    {
+        label: "Técnico",
+        sublabel: "50/30/20",
+        config: [
+            { dimension: "skills", weight: 0.50, description: "Skills técnicos y blandos" },
+            { dimension: "experience", weight: 0.30, description: "Experiencia laboral relevante" },
+            { dimension: "education", weight: 0.20, description: "Formación académica" },
+        ],
+    },
+    {
+        label: "Liderazgo",
+        sublabel: "35/35/30",
+        config: [
+            { dimension: "skills", weight: 0.35, description: "Skills técnicos y blandos" },
+            { dimension: "experience", weight: 0.35, description: "Experiencia laboral relevante" },
+            { dimension: "education", weight: 0.30, description: "Formación académica" },
+        ],
+    },
+    {
+        label: "Académico",
+        sublabel: "35/30/35",
+        config: [
+            { dimension: "skills", weight: 0.35, description: "Skills técnicos y blandos" },
+            { dimension: "experience", weight: 0.30, description: "Experiencia laboral relevante" },
+            { dimension: "education", weight: 0.35, description: "Formación académica" },
+        ],
+    },
 ];
 
 const SENIORITY_OPTIONS = [
@@ -25,12 +54,14 @@ const SENIORITY_OPTIONS = [
 
 const EDUCATION_OPTIONS = [
     { value: "", label: "Sin requisito" },
-    { value: "high_school", label: "Bachillerato / Técnico" },
+    { value: "high_school", label: "Secundaria / Bachillerato" },
     { value: "associate", label: "Técnico Superior" },
-    { value: "bachelor", label: "Licenciatura / Ingeniería" },
-    { value: "master", label: "Maestría / MBA" },
+    { value: "bachelor", label: "Universitaria (Bachiller / Licenciatura)" },
+    { value: "master", label: "Posgrado (Maestría / MBA)" },
     { value: "phd", label: "Doctorado" },
 ];
+
+const LANGUAGE_LEVEL_OPTIONS = ["Básico", "Intermedio", "Avanzado", "Nativo", "Bilingüe"];
 
 // ── Skill chip input ──────────────────────────────────────────────────────────
 interface SkillChipsProps {
@@ -104,16 +135,13 @@ function SkillChips({ label, color, skills, onAdd, onRemove }: SkillChipsProps) 
 // ── Main component ────────────────────────────────────────────────────────────
 const CreateVacancy: React.FC = () => {
     const router = useRouter();
-    const { generate, isGenerating, isAvailable } = useJobDescriptionGenerator();
 
     // ── form state ───────────────────────────────────────────────────────────
-    const [aiPrompt, setAiPrompt] = useState("");
     const [jobTitle, setJobTitle] = useState("");
     const [department, setDepartment] = useState("");
     const [seniority, setSeniority] = useState("");
     const [modality, setModality] = useState("hybrid");
     const [industry, setIndustry] = useState("");
-    const [location, setLocation] = useState("");
     const [minExperience, setMinExperience] = useState(0);
     const [educationLevel, setEducationLevel] = useState("");
     const [description, setDescription] = useState("");
@@ -121,6 +149,7 @@ const CreateVacancy: React.FC = () => {
     const [keyObjectives, setKeyObjectives] = useState<string[]>(["", ""]);
     const [requiredSkills, setRequiredSkills] = useState<string[]>([]);
     const [preferredSkills, setPreferredSkills] = useState<string[]>([]);
+    const [requiredLanguages, setRequiredLanguages] = useState<LanguageRequirement[]>([]);
     const [scoringConfig, setScoringConfig] = useState<ScoringDimension[]>(DEFAULT_SCORING);
 
     // ── status ───────────────────────────────────────────────────────────────
@@ -129,6 +158,7 @@ const CreateVacancy: React.FC = () => {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analyzeError, setAnalyzeError] = useState<string | null>(null);
     const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+    const [jdWarnings, setJdWarnings] = useState<string[]>([]);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // ── scoring ──────────────────────────────────────────────────────────────
@@ -184,29 +214,21 @@ const CreateVacancy: React.FC = () => {
             if (data.preferred_skills?.length) setPreferredSkills(data.preferred_skills);
             if (data.responsibilities?.length) setResponsibilities(data.responsibilities.slice(0, 8));
             if (data.key_objectives?.length) setKeyObjectives(data.key_objectives.slice(0, 6));
+            if (data.required_languages?.length) setRequiredLanguages(data.required_languages);
+
+            // JD quality warnings
+            const warnings: string[] = [];
+            const skills = data.required_skills ?? [];
+            if (skills.length < 3) warnings.push("Se extrajeron menos de 3 habilidades requeridas — el matching será poco preciso. Agrégalas manualmente.");
+            if ((data.min_experience_years ?? 0) > 8) warnings.push("El requisito de experiencia supera los 8 años — podría limitar demasiado el pool de candidatos.");
+            if (!data.description || String(data.description).trim().length < 50) warnings.push("La descripción del puesto es muy corta — una descripción rica mejora el matching semántico.");
+            if (!data.required_languages?.length) warnings.push("No se detectaron requisitos de idioma — si el inglés u otro idioma es relevante, agrégalo.");
+            setJdWarnings(warnings);
         } catch (err: any) {
             setAnalyzeError(err.response?.data?.detail || "Error al analizar el documento");
             setUploadedFileName(null);
         } finally {
             setIsAnalyzing(false);
-        }
-    };
-
-    // ── AI generate ───────────────────────────────────────────────────────────
-    const handleGenerateAI = async () => {
-        if (!aiPrompt.trim()) return;
-        try {
-            const result = await generate(aiPrompt);
-            if (result) {
-                if (result.title) setJobTitle(result.title);
-                if (result.description) setDescription(result.description);
-                if (result.required_skills?.length) setRequiredSkills(result.required_skills);
-                if (result.preferred_skills?.length) setPreferredSkills(result.preferred_skills);
-                if (result.min_experience_years) setMinExperience(result.min_experience_years);
-                if (result.education_level) setEducationLevel(result.education_level);
-            }
-        } catch (err) {
-            console.error(err);
         }
     };
 
@@ -225,7 +247,6 @@ const CreateVacancy: React.FC = () => {
                 seniority_level: seniority || undefined,
                 work_modality: modality || undefined,
                 industry: industry || undefined,
-                location: location || undefined,
                 required_skills: requiredSkills,
                 preferred_skills: preferredSkills,
                 responsibilities: responsibilities.filter(r => r.trim()),
@@ -233,6 +254,7 @@ const CreateVacancy: React.FC = () => {
                 min_experience_years: minExperience,
                 education_level: educationLevel || undefined,
                 status: "active",
+                required_languages: requiredLanguages.filter(l => l.idioma.trim()),
                 scoring_config: scoringValid ? scoringConfig : undefined,
             });
             router.push("/jobs");
@@ -242,8 +264,6 @@ const CreateVacancy: React.FC = () => {
             setIsSaving(false);
         }
     };
-
-    const quickTags = ["Data Scientist", "Backend Dev", "HR Manager", "Product Manager"];
 
     return (
         <>
@@ -280,57 +300,8 @@ const CreateVacancy: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                {/* Left Column: AI sidebar */}
+                {/* Left Column: sidebar */}
                 <div className="lg:col-span-4 flex flex-col gap-6">
-
-                    {/* AI Writer */}
-                    <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden shadow-sm">
-                        <div className="p-4 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900 border-b border-slate-100 dark:border-slate-800">
-                            <h3 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wide flex items-center gap-2">
-                                <span className="p-1 rounded bg-indigo-100 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400">
-                                    <span className="material-symbols-outlined text-[18px]">auto_awesome</span>
-                                </span>
-                                Redactor IA
-                            </h3>
-                        </div>
-                        <div className="p-5 space-y-4">
-                            <div className="space-y-2">
-                                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
-                                    Describe el puesto ideal
-                                </label>
-                                <textarea
-                                    className="w-full h-28 px-3 py-2 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-primary focus:border-transparent resize-none outline-none"
-                                    placeholder="Ej: Busco un Data Scientist Senior para liderar modelos de ML en fintech..."
-                                    value={aiPrompt}
-                                    onChange={e => setAiPrompt(e.target.value)}
-                                />
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                                {quickTags.map(tag => (
-                                    <button
-                                        key={tag}
-                                        onClick={() => setAiPrompt(prev => `${prev} ${tag}`)}
-                                        className="px-2 py-1 text-[10px] uppercase font-bold tracking-wider bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 rounded hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                                    >
-                                        {tag}
-                                    </button>
-                                ))}
-                            </div>
-                            <button
-                                onClick={handleGenerateAI}
-                                disabled={isGenerating || !isAvailable}
-                                className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
-                            >
-                                {isGenerating ? "Generando..." : "Generar Perfil"}
-                                <span className="material-symbols-outlined text-[16px]">magic_button</span>
-                            </button>
-                            {!isAvailable && (
-                                <p className="text-xs text-amber-600 dark:text-amber-400 text-center">
-                                    IA no disponible. Configura un proveedor en Ajustes.
-                                </p>
-                            )}
-                        </div>
-                    </div>
 
                     {/* File Upload */}
                     <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden shadow-sm">
@@ -391,6 +362,24 @@ const CreateVacancy: React.FC = () => {
                                 )}
                             </div>
                             {analyzeError && <p className="mt-2 text-xs text-rose-500">{analyzeError}</p>}
+                            {jdWarnings.length > 0 && (
+                                <div className="mt-3 rounded-lg border border-amber-300/40 bg-amber-50 dark:bg-amber-500/10 p-3 space-y-1.5">
+                                    <p className="text-xs font-bold text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
+                                        <span className="material-symbols-outlined text-[14px]">warning</span>
+                                        Sugerencias de calidad
+                                    </p>
+                                    {jdWarnings.map((w, i) => (
+                                        <p key={i} className="text-xs text-amber-700 dark:text-amber-300 pl-1">· {w}</p>
+                                    ))}
+                                    <button
+                                        type="button"
+                                        onClick={() => setJdWarnings([])}
+                                        className="text-[10px] text-amber-500 hover:text-amber-400 mt-1"
+                                    >
+                                        Descartar
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -415,6 +404,20 @@ const CreateVacancy: React.FC = () => {
                             <p className="text-xs text-slate-500 dark:text-slate-400">
                                 Define el peso de cada dimensión en el matching para este puesto.
                             </p>
+                            {/* Preset buttons */}
+                            <div className="flex gap-1.5 flex-wrap">
+                                {SCORING_PRESETS.map(preset => (
+                                    <button
+                                        key={preset.label}
+                                        type="button"
+                                        onClick={() => setScoringConfig([...preset.config])}
+                                        className="flex flex-col items-center px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:border-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 hover:text-indigo-600 dark:hover:text-indigo-400 transition-all text-slate-600 dark:text-slate-400"
+                                    >
+                                        <span className="text-xs font-semibold leading-none">{preset.label}</span>
+                                        <span className="text-[10px] text-slate-400 mt-0.5">{preset.sublabel}</span>
+                                    </button>
+                                ))}
+                            </div>
                             {scoringConfig.map((dim, idx) => (
                                 <div key={dim.dimension} className="flex items-center gap-3">
                                     <span className="w-24 text-sm font-medium text-slate-700 dark:text-slate-300 capitalize">
@@ -483,10 +486,11 @@ const CreateVacancy: React.FC = () => {
                                         </label>
                                         <input
                                             className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-transparent outline-none shadow-sm"
-                                            placeholder="Ej: Tecnología, Data & Analytics..."
+                                            placeholder="Ej: Tecnología, Legal, Comercial..."
                                             value={department}
                                             onChange={e => setDepartment(e.target.value)}
                                         />
+                                        <p className="text-[10px] text-slate-400">Solo organizativo — no afecta el matching.</p>
                                     </div>
 
                                     {/* Seniority */}
@@ -532,22 +536,6 @@ const CreateVacancy: React.FC = () => {
                                             value={industry}
                                             onChange={e => setIndustry(e.target.value)}
                                         />
-                                    </div>
-
-                                    {/* Ubicación */}
-                                    <div className="space-y-1.5">
-                                        <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wide">
-                                            Ubicación
-                                        </label>
-                                        <div className="relative">
-                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-400 text-[18px]">location_on</span>
-                                            <input
-                                                className="w-full pl-9 pr-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-transparent outline-none shadow-sm"
-                                                placeholder="Ciudad, País"
-                                                value={location}
-                                                onChange={e => setLocation(e.target.value)}
-                                            />
-                                        </div>
                                     </div>
 
                                     {/* Años experiencia */}
@@ -625,6 +613,75 @@ const CreateVacancy: React.FC = () => {
                                         onAdd={s => addSkill("preferred", s)}
                                         onRemove={i => removeSkill("preferred", i)}
                                     />
+                                </div>
+                            </div>
+
+                            <hr className="border-slate-100 dark:border-slate-800" />
+
+                            {/* ── Idiomas Requeridos ───────────────────────────────── */}
+                            <div className="space-y-3">
+                                <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                    <span className="material-symbols-outlined text-[14px]">translate</span>
+                                    Idiomas Requeridos
+                                    <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 font-bold">
+                                        Afecta el matching
+                                    </span>
+                                </h3>
+                                <p className="text-xs text-slate-400">Agrega los idiomas que el candidato debe dominar. Se considerarán en el scoring semántico.</p>
+                                <div className="space-y-2">
+                                    {requiredLanguages.map((lang, idx) => (
+                                        <div key={idx} className="flex items-center gap-2">
+                                            <input
+                                                className="flex-1 px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-primary outline-none"
+                                                placeholder="Ej: Inglés, Portugués..."
+                                                value={lang.idioma}
+                                                onChange={e => {
+                                                    const n = [...requiredLanguages];
+                                                    n[idx] = { ...n[idx], idioma: e.target.value };
+                                                    setRequiredLanguages(n);
+                                                }}
+                                            />
+                                            <select
+                                                className="px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-primary outline-none"
+                                                value={lang.nivel}
+                                                onChange={e => {
+                                                    const n = [...requiredLanguages];
+                                                    n[idx] = { ...n[idx], nivel: e.target.value };
+                                                    setRequiredLanguages(n);
+                                                }}
+                                            >
+                                                {LANGUAGE_LEVEL_OPTIONS.map(l => (
+                                                    <option key={l} value={l}>{l}</option>
+                                                ))}
+                                            </select>
+                                            <label className="flex items-center gap-1.5 text-xs text-slate-500 whitespace-nowrap cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={lang.obligatorio}
+                                                    onChange={e => {
+                                                        const n = [...requiredLanguages];
+                                                        n[idx] = { ...n[idx], obligatorio: e.target.checked };
+                                                        setRequiredLanguages(n);
+                                                    }}
+                                                    className="rounded"
+                                                />
+                                                Obligatorio
+                                            </label>
+                                            <button
+                                                onClick={() => setRequiredLanguages(requiredLanguages.filter((_, i) => i !== idx))}
+                                                className="text-slate-300 hover:text-rose-500"
+                                            >
+                                                <span className="material-symbols-outlined text-[20px]">delete</span>
+                                            </button>
+                                        </div>
+                                    ))}
+                                    <button
+                                        onClick={() => setRequiredLanguages([...requiredLanguages, { idioma: "", nivel: "Intermedio", obligatorio: true }])}
+                                        className="flex items-center gap-2 text-sm text-primary font-medium hover:text-primary/80 transition-colors px-1 mt-1"
+                                    >
+                                        <span className="material-symbols-outlined text-[18px]">add_circle</span>
+                                        Agregar idioma
+                                    </button>
                                 </div>
                             </div>
 

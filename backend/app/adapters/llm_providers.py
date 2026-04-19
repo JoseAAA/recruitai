@@ -4,7 +4,6 @@ Supports: Ollama (local), OpenAI, Google Gemini
 """
 import json
 import logging
-import re
 from abc import ABC, abstractmethod
 from typing import Optional, Type, TypeVar
 
@@ -26,6 +25,7 @@ class LLMProvider(ABC):
         self,
         prompt: str,
         json_mode: bool = False,
+        json_schema: Optional[dict] = None,
         temperature: float = 0.1,
         max_tokens: int = 2000,
         system_prompt: str = None,
@@ -81,38 +81,74 @@ class OllamaProvider(LLMProvider):
                 data = response.json()
                 models = data.get("models", [])
                 model_names = [m.get("name", "") for m in models]
-                
-                # Check if the CONFIGURED model is installed
+
                 for name in model_names:
                     if self.model in name:
                         return True
-                
-                # Model not found — tell user which models exist
+
                 logger.warning(
                     f"Ollama running but model '{self.model}' not found. "
-                    f"Available: {model_names}. Run: ollama pull {self.model}"
+                    f"Available: {model_names}."
                 )
                 return False
             return False
         except Exception as e:
             logger.warning(f"Ollama not available: {e}")
             return False
+
+    async def ensure_model(self) -> bool:
+        """Pull model from Ollama registry if not already installed.
+
+        Called once at startup — not on every request. Changing MATCH_MODEL
+        or EXTRACTION_MODEL in .env is enough: the new model is pulled
+        automatically on the next container start.
+        """
+        try:
+            response = await self.client.get(f"{self.base_url}/api/tags", timeout=5.0)
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                if any(self.model in m.get("name", "") for m in models):
+                    logger.info(f"Model '{self.model}' already installed — skipping pull")
+                    return True
+
+            logger.info(f"Model '{self.model}' not found — pulling from Ollama registry (this may take a few minutes)...")
+            pull_response = await self.client.post(
+                f"{self.base_url}/api/pull",
+                json={"name": self.model, "stream": False},
+                timeout=600.0,  # 10 min — gemma3:4b is ~2.5GB
+            )
+            if pull_response.status_code == 200:
+                logger.info(f"Model '{self.model}' pulled successfully")
+                return True
+            else:
+                logger.error(f"Failed to pull '{self.model}': HTTP {pull_response.status_code} — {pull_response.text[:200]}")
+                return False
+        except Exception as e:
+            logger.error(f"ensure_model failed for '{self.model}': {e}")
+            return False
     
     async def generate(
         self,
         prompt: str,
         json_mode: bool = False,
+        json_schema: Optional[dict] = None,
         temperature: float = 0.1,
         max_tokens: int = 2000,
         system_prompt: str = None,
     ) -> str:
         """
         Generate text using Ollama /api/chat endpoint.
-        
+
         Uses /api/chat instead of /api/generate because:
         - Supports system role → better instruction following
         - Standard message format compatible with all models
-        - Better structured output for Qwen 3.5
+        - Supports constrained decoding via JSON Schema (json_schema param)
+
+        json_schema: when provided, Ollama uses constrained decoding — the model
+        physically cannot emit tokens that violate the schema. More reliable than
+        free-form json_mode=True. Requires Ollama >= 0.5.
+        Ref: Ollama structured outputs docs (2024), Willard & Louf "Efficient Guided
+        Generation for Large Language Models" (2023).
         """
         messages = []
         
@@ -123,20 +159,6 @@ class OllamaProvider(LLMProvider):
         # User message — the actual prompt
         messages.append({"role": "user", "content": prompt})
         
-        # Auto-detect /no_think token: translates prompt hint to Ollama API param.
-        # This is critical for qwen3.5 — without "think": false the model spends
-        # all num_predict tokens on chain-of-thought and emits empty content.
-        has_no_think = any(
-            msg.get("content", "").lstrip().startswith("/no_think")
-            for msg in messages
-            if msg.get("role") == "user"
-        )
-        if has_no_think:
-            # Strip the /no_think prefix from the user message (already handled by API param)
-            for msg in messages:
-                if msg.get("role") == "user":
-                    msg["content"] = re.sub(r"^/no_think\s*\n?", "", msg["content"].lstrip(), count=1)
-
         request_body = {
             "model": self.model,
             "messages": messages,
@@ -146,9 +168,16 @@ class OllamaProvider(LLMProvider):
                 "num_predict": max_tokens,
             }
         }
-        if has_no_think:
+        # OLLAMA_THINKING=false → desactiva el chain-of-thought en modelos thinking
+        # (qwen3, deepseek-r1). En modelos normales (gemma3:4b) este parámetro
+        # es ignorado por Ollama, por lo que es seguro enviarlo siempre.
+        if not settings.OLLAMA_THINKING:
             request_body["think"] = False
-        if json_mode:
+        if json_schema:
+            # Constrained decoding: model cannot emit tokens that violate the schema.
+            # json_schema takes priority over json_mode when both are provided.
+            request_body["format"] = json_schema
+        elif json_mode:
             request_body["format"] = "json"
         
         response = await self.client.post(
@@ -222,6 +251,7 @@ class OpenAIProvider(LLMProvider):
         self,
         prompt: str,
         json_mode: bool = False,
+        json_schema: Optional[dict] = None,
         temperature: float = 0.1,
         max_tokens: int = 2000,
         system_prompt: str = None,
@@ -230,7 +260,7 @@ class OpenAIProvider(LLMProvider):
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        
+
         request_body = {
             "model": self.model,
             "messages": messages,
@@ -292,6 +322,7 @@ class GeminiProvider(LLMProvider):
         self,
         prompt: str,
         json_mode: bool = False,
+        json_schema: Optional[dict] = None,
         temperature: float = 0.1,
         max_tokens: int = 2000,
         max_retries: int = 3,
@@ -300,6 +331,8 @@ class GeminiProvider(LLMProvider):
         """
         Generate text with automatic retry on rate limit (429) errors.
         Uses exponential backoff: 1s, 2s, 4s delays between retries.
+        json_schema is accepted for API compatibility but Gemini uses its own
+        structured output mechanism (responseMimeType + responseSchema).
         """
         import asyncio
         

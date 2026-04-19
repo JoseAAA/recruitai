@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.routes.auth import get_current_active_user, UserResponse
 from app.core.database import get_db
 from app.db.models import CandidateDB, CandidateNoteDB, UserDB
 
@@ -48,6 +49,7 @@ class NotesListResponse(BaseModel):
 @router.get("/{candidate_id}/notes", response_model=NotesListResponse)
 async def get_candidate_notes(
     candidate_id: UUID,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Get all notes for a candidate."""
@@ -91,6 +93,7 @@ async def get_candidate_notes(
 async def create_candidate_note(
     candidate_id: UUID,
     note: NoteCreate,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new note for a candidate."""
@@ -143,6 +146,7 @@ async def create_candidate_note(
 async def update_candidate_rating(
     candidate_id: UUID,
     rating: int,
+    current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Update candidate rating (1-5 stars)."""
@@ -160,82 +164,4 @@ async def update_candidate_rating(
     await db.commit()
     
     return {"success": True, "rating": rating}
-
-
-# ============ Interview Questions Generator ============
-
-from app.db.models import JobProfileDB
-from app.adapters.llm_engine import LLMEngine
-
-
-class InterviewQuestionsRequest(BaseModel):
-    job_id: UUID
-
-
-class InterviewQuestion(BaseModel):
-    category: str
-    question: str
-
-
-class InterviewQuestionsResponse(BaseModel):
-    candidate_name: str
-    job_title: str
-    skill_gaps: List[str]
-    matching_skills: List[str]
-    questions: dict
-    generated_by_ai: bool
-
-
-@router.get("/{candidate_id}/interview-questions")
-async def get_interview_questions(
-    candidate_id: UUID,
-    job_id: UUID,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Generate tailored interview questions for a candidate based on a specific job.
-    Analyzes skill gaps and generates questions in categories:
-    - Technical questions
-    - Gap questions (focused on missing skills)
-    - Behavioral questions
-    - Situational questions
-    """
-    # Get candidate
-    result = await db.execute(
-        select(CandidateDB).where(CandidateDB.id == candidate_id)
-    )
-    candidate = result.scalar_one_or_none()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    
-    # Get job
-    result = await db.execute(
-        select(JobProfileDB).where(JobProfileDB.id == job_id)
-    )
-    job = result.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    # Calculate skill gaps
-    candidate_skills = set(s.lower() for s in (candidate.skills or []))
-    job_required = set(s.lower() for s in (job.required_skills or []))
-    job_preferred = set(s.lower() for s in (job.preferred_skills or []))
-    
-    # Calculate matching and missing skills
-    matching_skills = list(job_required.intersection(candidate_skills))
-    skill_gaps = list(job_required - candidate_skills)
-    
-    # Generate questions using LLM
-    llm = LLMEngine()
-    questions_data = await llm.generate_interview_questions(
-        candidate_name=candidate.full_name,
-        candidate_skills=candidate.skills or [],
-        job_title=job.title,
-        job_required_skills=job.required_skills or [],
-        job_preferred_skills=job.preferred_skills or [],
-        skill_gaps=skill_gaps,
-        matching_skills=matching_skills
-    )
-    
-    return questions_data
 

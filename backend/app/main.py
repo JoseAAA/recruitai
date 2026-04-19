@@ -46,24 +46,35 @@ class MaxBodySizeMiddleware(BaseHTTPMiddleware):
 
 
 async def _warmup_ollama():
-    """Pre-load LLM and embedding models into GPU VRAM on startup.
+    """Ensure LLM and embedding models are installed, then pre-load into GPU VRAM.
 
-    Avoids the 20-30s cold-start delay on the first CV upload of each session.
-    Runs in background so it doesn't block server startup.
+    Auto-pull: if the model configured in .env is not installed, it is pulled
+    automatically before the warmup ping. Changing MATCH_MODEL or
+    EXTRACTION_MODEL in .env is sufficient — no manual `ollama pull` needed.
+
+    Runs in background so it does not block server startup.
     """
     import asyncio
-    import httpx
     from app.core.config import settings
+    from app.adapters.llm_providers import OllamaProvider
 
     ollama_host = getattr(settings, "OLLAMA_HOST", "http://ollama:11434")
     extraction_model = getattr(settings, "EXTRACTION_MODEL", "gemma3:4b")
+    match_model = getattr(settings, "MATCH_MODEL", "gemma3:4b")
     embedding_model = getattr(settings, "EMBEDDING_MODEL", "nomic-embed-text")
 
-    # Wait briefly for Ollama to be fully ready
+    # Wait briefly for Ollama container to be fully ready
     await asyncio.sleep(5)
 
+    # --- Step 1: auto-pull any missing models ---
+    for model_name in dict.fromkeys([extraction_model, match_model, embedding_model]):
+        provider = OllamaProvider(model=model_name)
+        await provider.ensure_model()
+        await provider.close()
+
+    # --- Step 2: warmup ping — loads model into GPU VRAM ---
+    import httpx
     async with httpx.AsyncClient(timeout=120.0) as client:
-        # Pre-load extraction model — send a tiny prompt to trigger model loading
         try:
             r = await client.post(
                 f"{ollama_host}/api/generate",
@@ -76,7 +87,6 @@ async def _warmup_ollama():
         except Exception as e:
             logger.warning(f"Warmup {extraction_model} failed (will load on first request): {e}")
 
-        # Pre-load embedding model
         try:
             r = await client.post(
                 f"{ollama_host}/api/embed",
@@ -144,8 +154,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
 

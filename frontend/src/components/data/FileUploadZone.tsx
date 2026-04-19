@@ -6,12 +6,20 @@ interface FileUploadZoneProps {
     onFilesSelected: (files: File[]) => void;
     isUploading: boolean;
     uploadProgress: number;
+    currentFile?: string;
+    completedCount?: number;
+    totalFiles?: number;
+    estimatedRemaining?: string;
 }
 
 const FileUploadZone: React.FC<FileUploadZoneProps> = ({
     onFilesSelected,
     isUploading,
     uploadProgress,
+    currentFile,
+    completedCount,
+    totalFiles,
+    estimatedRemaining,
 }) => {
     const [isDragOver, setIsDragOver] = useState(false);
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -90,7 +98,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
                 onClick={handleClick}
                 className={`relative border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${isDragOver
                         ? "border-primary bg-primary/10"
-                        : "border-slate-600 hover:border-slate-500 bg-slate-800/30 hover:bg-slate-800/50"
+                        : "border-slate-300 dark:border-slate-600 hover:border-slate-400 dark:hover:border-slate-500 bg-slate-50 dark:bg-slate-800/30 hover:bg-slate-100 dark:hover:bg-slate-800/50"
                     }`}
             >
                 <input
@@ -104,7 +112,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
 
                 <div className="flex flex-col items-center gap-4">
                     <div
-                        className={`p-4 rounded-full ${isDragOver ? "bg-primary/20" : "bg-slate-700"
+                        className={`p-4 rounded-full ${isDragOver ? "bg-primary/20" : "bg-slate-200 dark:bg-slate-700"
                             }`}
                     >
                         <span
@@ -115,7 +123,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
                         </span>
                     </div>
                     <div>
-                        <p className="text-lg font-semibold text-white">
+                        <p className="text-lg font-semibold text-slate-900 dark:text-white">
                             {isDragOver
                                 ? "Suelta los archivos aquí"
                                 : "Arrastra tus CVs aquí"}
@@ -128,7 +136,7 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
                         {["PDF", "DOCX", "DOC", "TXT"].map((format) => (
                             <span
                                 key={format}
-                                className="px-2 py-0.5 bg-slate-700 text-slate-400 rounded text-xs"
+                                className="px-2 py-0.5 bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400 rounded text-xs"
                             >
                                 .{format.toLowerCase()}
                             </span>
@@ -141,12 +149,12 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
             {selectedFiles.length > 0 && (
                 <div className="space-y-2">
                     <div className="flex items-center justify-between">
-                        <p className="text-sm font-medium text-slate-300">
+                        <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
                             {selectedFiles.length} archivo(s) seleccionado(s)
                         </p>
                         <button
                             onClick={() => setSelectedFiles([])}
-                            className="text-xs text-slate-500 hover:text-slate-300"
+                            className="text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                         >
                             Limpiar todo
                         </button>
@@ -156,14 +164,14 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
                         {selectedFiles.map((file, index) => (
                             <div
                                 key={index}
-                                className="flex items-center justify-between p-3 bg-slate-800 border border-slate-700 rounded-lg"
+                                className="flex items-center justify-between p-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg"
                             >
                                 <div className="flex items-center gap-3 min-w-0">
                                     <span className="material-symbols-outlined text-slate-400 text-[20px]">
                                         description
                                     </span>
                                     <div className="min-w-0">
-                                        <p className="text-sm font-medium text-white truncate">
+                                        <p className="text-sm font-medium text-slate-900 dark:text-white truncate">
                                             {file.name}
                                         </p>
                                         <p className="text-xs text-slate-500">
@@ -192,29 +200,51 @@ const FileUploadZone: React.FC<FileUploadZoneProps> = ({
 
             {/* Upload Progress */}
             {isUploading && (
-                <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
-                    <div className="flex items-center justify-between mb-2">
+                <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
+                    {/* Header: count + % */}
+                    <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                             <span className="material-symbols-outlined text-primary text-[20px] animate-spin">
                                 sync
                             </span>
-                            <span className="text-sm font-medium text-white">
-                                Subiendo y procesando CVs...
+                            <span className="text-sm font-medium text-slate-900 dark:text-white">
+                                {completedCount != null && totalFiles
+                                    ? `${completedCount} de ${totalFiles} CVs procesados`
+                                    : "Procesando CVs..."}
                             </span>
                         </div>
-                        <span className="text-sm font-bold text-primary">
-                            {uploadProgress}%
-                        </span>
+                        <span className="text-sm font-bold text-primary">{uploadProgress}%</span>
                     </div>
-                    <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+
+                    {/* Progress bar */}
+                    <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
                         <div
                             className="h-full bg-primary transition-all duration-300"
                             style={{ width: `${uploadProgress}%` }}
                         />
                     </div>
-                    <p className="text-xs text-slate-500 mt-2">
-                        Extrayendo información con IA...
-                    </p>
+
+                    {/* Footer: current file + time remaining */}
+                    <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs text-slate-500 truncate">
+                            {currentFile
+                                ? <><span className="text-slate-400">Procesando:</span> {currentFile}</>
+                                : "Extrayendo información con IA..."}
+                        </p>
+                        {estimatedRemaining && (
+                            <span className="text-xs text-amber-400 flex-shrink-0 flex items-center gap-1">
+                                <span className="material-symbols-outlined text-[14px]">schedule</span>
+                                {estimatedRemaining} restantes
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Note for large batches */}
+                    {totalFiles != null && totalFiles > 10 && (
+                        <p className="text-xs text-slate-500 dark:text-slate-600 border-t border-slate-200 dark:border-slate-700 pt-2">
+                            Lote grande — puedes dejar esta página abierta y volver cuando termine.
+                        </p>
+                    )}
                 </div>
             )}
         </div>

@@ -10,12 +10,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from fastapi.responses import Response
 
 from app.adapters import EmbeddingService, LLMEngine, QdrantRepository
+from app.adapters.llm_engine import PromptInjectionError
 from app.adapters.storage import StorageService, BUCKET_CVS
 from app.core.privacy import AuditLogger
 from app.adapters.document_extractor import DocumentExtractor, DocumentParsingError
@@ -43,21 +45,31 @@ SPANISH_MONTHS = {
 
 
 def parse_date_str(s: Optional[str]) -> Optional[date_type]:
-    """Parse date strings like '2021-12', 'DICIEMBRE 2021', 'Mayo 2024' into a date object."""
-    if not s or s.strip().lower() in ('presente', 'actual', 'current', 'actualidad', ''):
+    """Parse date strings into a date object.
+    Handles: YYYY-MM, YYYY-MM-DD, YYYY, 'Month YYYY', 'YYYY Month'.
+    Returns None for null/current markers like 'Presente', 'Actual'.
+    """
+    if not s:
         return None
     s = s.strip()
-    # Try YYYY-MM
+    if s.lower() in ('presente', 'actual', 'current', 'actualidad', 'a la fecha',
+                     'hasta hoy', 'en curso', 'hoy', 'vigente', 'actualmente', ''):
+        return None
+    # YYYY-MM-DD (LLM sometimes returns full ISO despite YYYY-MM instructions)
+    m = _re.match(r'^(\d{4})-(\d{1,2})-\d{1,2}$', s)
+    if m:
+        return date_type(int(m.group(1)), int(m.group(2)), 1)
+    # YYYY-MM
     m = _re.match(r'^(\d{4})-(\d{1,2})$', s)
     if m:
         return date_type(int(m.group(1)), int(m.group(2)), 1)
-    # Try "MONTH YYYY" or "YYYY MONTH"
+    # "MONTH YYYY" or "YYYY MONTH"
     parts = s.lower().split()
     year = next((int(p) for p in parts if p.isdigit() and len(p) == 4), None)
     month = next((SPANISH_MONTHS[p] for p in parts if p in SPANISH_MONTHS), None)
     if year and month:
         return date_type(year, month, 1)
-    # Try just YYYY
+    # YYYY only
     if s.isdigit() and len(s) == 4:
         return date_type(int(s), 1, 1)
     return None
@@ -84,6 +96,7 @@ class CandidateResponse(BaseModel):
 class CandidateDetailResponse(CandidateResponse):
     experience: List[dict]
     education: List[dict]
+    idiomas: List[dict] = []
     raw_text: Optional[str]
 
 
@@ -104,41 +117,90 @@ class UploadResponse(BaseModel):
     job_id: Optional[UUID] = None
 
 
-# ============ Dependencies ============
+# ============ Dependencies (module-level singletons) ============
+
+_doc_extractor: Optional[DocumentExtractor] = None
+_embedding_service: Optional[EmbeddingService] = None
+_llm_engine: Optional[LLMEngine] = None
+_qdrant_repo: Optional[QdrantRepository] = None
+_storage: Optional[StorageService] = None
+
 
 def get_docling_extractor() -> DocumentExtractor:
-    return DocumentExtractor()
+    global _doc_extractor
+    if _doc_extractor is None:
+        _doc_extractor = DocumentExtractor()
+    return _doc_extractor
 
 
 def get_embedding_service() -> EmbeddingService:
-    return EmbeddingService()
+    global _embedding_service
+    if _embedding_service is None:
+        _embedding_service = EmbeddingService()
+    return _embedding_service
 
 
 def get_llm_engine() -> LLMEngine:
-    return LLMEngine()
+    global _llm_engine
+    if _llm_engine is None:
+        _llm_engine = LLMEngine()
+    return _llm_engine
 
 
 def get_qdrant_repo() -> QdrantRepository:
-    return QdrantRepository()
+    global _qdrant_repo
+    if _qdrant_repo is None:
+        _qdrant_repo = QdrantRepository()
+    return _qdrant_repo
 
 
 def get_storage() -> StorageService:
-    return StorageService()
+    global _storage
+    if _storage is None:
+        _storage = StorageService()
+    return _storage
 
 
 # ============ Helper Functions ============
 
 def calculate_experience_years(experience_entries: List[ExperienceEntryDB]) -> float:
-    """Calculate total years of experience."""
+    """Calculate total years of non-overlapping professional experience.
+
+    Uses interval merging so concurrent jobs are counted once, not doubled.
+    Example: two jobs from 2021-2023 and 2022-2024 → 3 years, not 4.
+    """
     from datetime import date as date_type
     today = date_type.today()
-    total_years = 0.0
+
+    # Build list of (start, end) intervals — only entries with a known start date
+    intervals: list[tuple[date_type, date_type]] = []
     for exp in experience_entries:
-        if exp.start_date:
-            # For current jobs use today as end date
-            end = today if (exp.is_current or not exp.end_date) else exp.end_date
-            years = (end.year - exp.start_date.year) + (end.month - exp.start_date.month) / 12
-            total_years += max(0, years)
+        if not exp.start_date:
+            continue
+        end = today if (exp.is_current or not exp.end_date) else exp.end_date
+        if end < exp.start_date:
+            continue  # corrupted entry — skip
+        intervals.append((exp.start_date, end))
+
+    if not intervals:
+        return 0.0
+
+    # Sort by start date, then merge overlapping/adjacent intervals
+    intervals.sort(key=lambda x: x[0])
+    merged: list[tuple[date_type, date_type]] = [intervals[0]]
+    for start, end in intervals[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:               # overlaps or adjacent → extend
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+
+    # Sum merged intervals in fractional years
+    total_years = 0.0
+    for start, end in merged:
+        years = (end.year - start.year) + (end.month - start.month) / 12
+        total_years += max(0.0, years)
+
     return round(total_years, 1)
 
 
@@ -163,20 +225,43 @@ async def upload_cv(
     Uses Vision API for PDFs/images (better accuracy with varied formats).
     Falls back to text extraction for unsupported formats.
     """
+    if not job_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debes asociar el CV a una vacante (job_id requerido)."
+        )
+
     allowed_types = [".pdf", ".docx"]
-    filename = file.filename or "unknown"
-    
-    file_ext = "." + filename.lower().split(".")[-1] if "." in filename else ""
-    
+    # Sanitize filename: strip path components, keep only basename
+    import os as _os
+    raw_filename = file.filename or "unknown"
+    filename = _os.path.basename(raw_filename).replace("..", "").strip() or "unknown"
+
+    file_ext = "." + filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
     if file_ext not in allowed_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type. Allowed: {allowed_types}"
+            detail=f"Tipo de archivo no permitido. Formatos aceptados: PDF, DOCX"
         )
-    
+
     try:
         # Read file content
         content = await file.read()
+
+        # Magic bytes validation — verify actual file content matches declared extension
+        PDF_MAGIC  = b"%PDF"
+        DOCX_MAGIC = b"PK\x03\x04"  # ZIP-based (OOXML)
+        if file_ext == ".pdf" and not content[:4].startswith(PDF_MAGIC):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El archivo no es un PDF válido"
+            )
+        if file_ext == ".docx" and not content[:4].startswith(DOCX_MAGIC):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El archivo no es un DOCX válido"
+            )
         file_hash = hashlib.sha256(content).hexdigest()
 
         # ── Deduplication: same file + same job = update, not insert ──────────
@@ -205,31 +290,52 @@ async def upload_cv(
         logger.info(f"File upload: {filename}, Extension: {file_ext}")
         logger.info(f"LLM_PROVIDER: {settings.LLM_PROVIDER}, EXTRACTION_MODEL: {getattr(settings, 'EXTRACTION_MODEL', 'Not set')}")
         
-        # 1. Convert to Markdown using Docling
+        # 1. Convert to Markdown using document extractor (PDF security scan included)
+        hidden_fragments: list[str] = []
         try:
-            logger.info(f"Starting Docling extraction for {filename}")
-            markdown_content, _ = await docling.parse_bytes(content, filename)
+            logger.info(f"Starting document extraction for {filename}")
+            markdown_content, doc_meta = await docling.parse_bytes(content, filename)
             raw_text = markdown_content
-            logger.info(f"Docling extraction successful. Markdown length: {len(raw_text)}")
+            hidden_fragments = doc_meta.get("hidden_text_fragments", [])
+            sec_warnings = doc_meta.get("security_warnings", [])
+            if sec_warnings:
+                logger.warning(
+                    f"Document security findings for {filename}: "
+                    + "; ".join(sec_warnings[:5])
+                )
+            logger.info(f"Document extraction successful. Markdown length: {len(raw_text)}")
         except Exception as e:
-            logger.error(f"Docling extraction failed: {e}")
+            logger.error(f"Document extraction failed for {filename}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to parse document: {str(e)}"
+                detail="No se pudo leer el documento. Verifica que el archivo no esté protegido con contraseña ni dañado."
             )
-            
-        # 2. Extract JSON using LLM (Gemma3)
+
+        # 2. Extract JSON using LLM — injection patterns checked against visible
+        #    text AND hidden PDF fragments (white text, metadata, off-page text)
         try:
             logger.info(f"Starting LLM extraction for {filename}")
-            extracted = await llm.extract_resume(raw_text, filename=filename)
+            extracted = await llm.extract_resume(
+                raw_text, filename=filename, hidden_fragments=hidden_fragments
+            )
             logger.info("JSON extraction successful")
+        except PromptInjectionError as e:
+            logger.warning(f"Prompt injection detected in CV {filename}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "ARCHIVO_RECHAZADO_SEGURIDAD: "
+                    "El documento contiene instrucciones maliciosas embebidas. "
+                    "Si crees que es un error, convierte el CV a texto plano (.txt) e inténtalo de nuevo."
+                ),
+            )
         except Exception as e:
-            logger.error(f"LLM extraction error: {e}")
+            logger.error(f"LLM extraction error for {filename}: {e}")
             import traceback
             logger.error(traceback.format_exc())
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to extract structured data: {str(e)}"
+                detail="Error al procesar el CV con IA. Intenta de nuevo en unos momentos."
             )
         
         # Create candidate in database
@@ -245,6 +351,7 @@ async def upload_cv(
             file_hash=file_hash,
             status="new",
             job_id=job_id,
+            idiomas=[{"idioma": id.idioma, "nivel": id.nivel, "certificacion": id.certificacion} for id in (extracted.idiomas or []) if id.idioma],
         )
         
         # Save file to MinIO
@@ -281,7 +388,7 @@ async def upload_cv(
             end_d = None if is_current else parse_date_str(exp.fecha_fin)
 
             # Fallback: parse 'periodo' when the LLM filled that field but left
-            # fecha_inicio / fecha_fin as null (common with small models like gemma3:4b).
+            # fecha_inicio / fecha_fin as null (fallback parser for any model).
             # periodo examples: "Enero 2025 – Actualidad", "Junio 2024 – Septiembre 2024"
             if exp.periodo and (not start_d or (not is_current and not end_d)):
                 pparts = _re.split(r'\s*[–—]\s*', exp.periodo.strip(), maxsplit=1)
@@ -378,13 +485,27 @@ async def upload_cv(
             summary_text=summary_text,
         )
         
+        # Calculate total experience years from extracted dates
+        from datetime import date as _today_t
+        _today = _today_t.today()
+        _total_months = 0
+        for _exp in (extracted.experiencia_profesional or []):
+            _start = parse_date_str(_exp.fecha_inicio)
+            _is_cur = _exp.es_trabajo_actual or (_exp.fecha_fin or "").strip().lower() in {
+                "presente", "actual", "actualidad", "current", "present", "ongoing", "hoy", "vigente"
+            }
+            _end = _today if _is_cur else parse_date_str(_exp.fecha_fin)
+            if _start and _end and _end >= _start:
+                _total_months += max(0, (_end.year - _start.year) * 12 + (_end.month - _start.month))
+        experience_years_calc = round(_total_months / 12, 1)
+
         await qdrant.upsert_candidate(
             candidate_id=candidate_db.id,
             vectors=vectors,
             payload={
                 "full_name": candidate_db.full_name,
                 "skills": candidate_db.skills,
-                "experience_years": 0,
+                "experience_years": experience_years_calc,
                 "status": candidate_db.status,
                 "job_id": str(job_id) if job_id else None,
             }
@@ -419,21 +540,20 @@ async def list_candidates(
     job_id_filter: Optional[UUID] = Query(None, alias="job_id"),
 ):
     """List candidates with pagination. Optionally filter by job_id or status."""
-    query = select(CandidateDB)
+    query = select(CandidateDB).options(selectinload(CandidateDB.experience))
 
     if status_filter:
         query = query.where(CandidateDB.status == status_filter)
     if job_id_filter:
         query = query.where(CandidateDB.job_id == job_id_filter)
 
-    # Get total count with same filters
-    count_query = select(CandidateDB.id)
+    # Efficient count with same filters
+    count_query = select(func.count(CandidateDB.id))
     if status_filter:
         count_query = count_query.where(CandidateDB.status == status_filter)
     if job_id_filter:
         count_query = count_query.where(CandidateDB.job_id == job_id_filter)
-    count_result = await db.execute(count_query)
-    total = len(count_result.all())
+    total = (await db.execute(count_query)).scalar_one()
 
     # Pagination
     query = query.offset((page - 1) * page_size).limit(page_size)
@@ -450,7 +570,7 @@ async def list_candidates(
                 linkedin=c.linkedin,
                 summary=c.summary,
                 skills=c.skills or [],
-                total_experience_years=0,
+                total_experience_years=calculate_experience_years(c.experience),
                 status=c.status,
                 job_id=c.job_id,
             )
@@ -530,6 +650,7 @@ async def get_candidate(
             }
             for e in education
         ],
+        idiomas=candidate.idiomas or [],
         raw_text=candidate.raw_text,
     )
 
@@ -671,51 +792,4 @@ async def update_candidate_status(
     return {"id": str(candidate_id), "status": new_status}
 
 
-# ============ Notes Endpoints ============
-
-class NoteRequest(BaseModel):
-    content: str
-    note_type: str = "general"
-
-
-@router.post("/{candidate_id}/notes")
-async def add_candidate_note(
-    candidate_id: UUID,
-    note: NoteRequest,
-    current_user: UserResponse = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Add a note to a candidate."""
-    # Check candidate exists
-    result = await db.execute(
-        select(CandidateDB).where(CandidateDB.id == candidate_id)
-    )
-    candidate = result.scalar_one_or_none()
-    
-    if not candidate:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Candidate not found"
-        )
-    
-    # For now, store notes in a simple format
-    # In a real app, you'd have a separate Notes table
-    from datetime import datetime
-    
-    note_entry = {
-        "type": note.note_type,
-        "content": note.content,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    
-    # Append to existing notes (stored as JSON in summary for now)
-    # TODO: Create proper CandidateNote table
-    if candidate.summary:
-        candidate.summary += f"\n\n[{note.note_type.upper()}] {note.content}"
-    else:
-        candidate.summary = f"[{note.note_type.upper()}] {note.content}"
-    
-    await db.commit()
-    
-    return {"id": str(candidate_id), "note": note_entry, "message": "Note added"}
 
