@@ -7,6 +7,8 @@ import { useAuth } from "@/lib/auth-context";
 import { jobsApi, candidatesApi, searchApi, JobProfile, Candidate, MatchResult, InterviewQuestion } from "@/lib/api";
 import { exportJobExcel } from "@/lib/export";
 import { scoreColor } from "@/lib/utils";
+import { AIDecisionBanner } from "@/components/compliance/AIDecisionBanner";
+import { ExplainDecisionModal } from "@/components/compliance/ExplainDecisionModal";
 
 // ── Recommendation config ────────────────────────────────────────────────────
 
@@ -23,6 +25,47 @@ const REC_BG: Record<string, string> = {
     "Considerar":            "bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/30",
     "No recomendado":        "bg-slate-100 dark:bg-slate-700/30 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-600",
 };
+
+// Indicador de progreso del análisis IA: cronómetro real + barra estimada.
+// Sin tecnicismos ni nombres de proveedor (regla AGENTS.md §7) — antes decía
+// "~30 segundos por candidato en Ollama local" incluso usando la nube.
+// La barra avanza hacia un estimado conservador (~12s/candidato) y se frena
+// en 95% — nunca dice "casi listo" si no le consta.
+function MatchProgress({ candidateCount }: { candidateCount: number }) {
+    const [elapsed, setElapsed] = useState(0);
+    useEffect(() => {
+        const t = setInterval(() => setElapsed((e) => e + 1), 1000);
+        return () => clearInterval(t);
+    }, []);
+    const estimate = Math.max(40, candidateCount * 12);
+    const pct = Math.min(95, Math.round((elapsed / estimate) * 100));
+    const mm = Math.floor(elapsed / 60);
+    const ss = String(elapsed % 60).padStart(2, "0");
+    return (
+        <div className="py-16 flex flex-col items-center gap-4 text-slate-500 px-8">
+            <span className="material-symbols-outlined text-[40px] text-primary animate-spin">sync</span>
+            <p className="text-sm font-medium">
+                Evaluando {candidateCount} candidato{candidateCount !== 1 ? "s" : ""} con IA...
+            </p>
+            <div className="w-full max-w-xs">
+                <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                    <div
+                        className="h-full bg-primary rounded-full transition-all duration-1000"
+                        style={{ width: `${pct}%` }}
+                    />
+                </div>
+                <div className="flex justify-between mt-1.5 text-[11px] text-slate-400">
+                    <span>{pct}% estimado</span>
+                    <span>{mm}:{ss} transcurrido</span>
+                </div>
+            </div>
+            <p className="text-xs text-slate-400 text-center max-w-sm">
+                Cada candidato se evalúa individualmente. Puede tomar unos minutos —
+                no cierres esta pantalla.
+            </p>
+        </div>
+    );
+}
 
 function ScoreBadge({ value }: { value: number }) {
     const v = Math.round(value);
@@ -76,6 +119,9 @@ function RankingSection({
     const [minEdu, setMinEdu] = useState(0);
     const [expandedGuia, setExpandedGuia] = useState<Set<string>>(new Set());
     const [exporting, setExporting] = useState(false);
+
+    // Modal "Explicar al candidato" (derecho a explicación — DS 115-2025-PCM).
+    const [explainTarget, setExplainTarget] = useState<{ id: string; name: string } | null>(null);
 
     function toggleSort(col: SortCol) {
         if (sortBy === col) setSortDir(d => d === "desc" ? "asc" : "desc");
@@ -131,6 +177,20 @@ function RankingSection({
 
     return (
         <div className="space-y-4">
+            {/* DS 115-2025-PCM: aviso de intervención humana sobre el ranking IA */}
+            <AIDecisionBanner variant="ranking" />
+
+            {/* DS 115-2025-PCM: derecho a explicación — la fórmula del puntaje
+                debe ser comprensible sin tecnicismos */}
+            {scores.length > 0 && (
+                <p className="text-xs text-slate-500 dark:text-slate-400 px-1">
+                    <span className="font-semibold">¿Cómo se calcula el puntaje?</span>{" "}
+                    Total = Habilidades ({skillsW}%) + Experiencia ({expW}%) + Educación ({eduW}%).
+                    Cada dimensión va de 0 a 100 según qué tan bien el perfil del candidato cubre
+                    lo que pide esta vacante.
+                </p>
+            )}
+
             {/* Toolbar */}
             <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
                 <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -208,11 +268,7 @@ function RankingSection({
             {/* List */}
             <div className="bg-white dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
                 {loading ? (
-                    <div className="py-16 flex flex-col items-center gap-4 text-slate-500">
-                        <span className="material-symbols-outlined text-[40px] text-primary animate-spin">sync</span>
-                        <p className="text-sm">Evaluando {candidateCount} candidato{candidateCount !== 1 ? "s" : ""} con IA...</p>
-                        <p className="text-xs text-slate-400">~30 segundos por candidato en Ollama local</p>
-                    </div>
+                    <MatchProgress candidateCount={candidateCount} />
                 ) : sorted.length === 0 ? (
                     <div className="py-16 text-center">
                         <span className="material-symbols-outlined text-[48px] text-slate-300 dark:text-slate-600 block mb-3">leaderboard</span>
@@ -332,9 +388,23 @@ function RankingSection({
                                             </div>
                                         )}
 
+                                        {/* Acciones por candidato */}
+                                        <div className="ml-11 flex items-center gap-3 flex-wrap">
+                                            {/* "Explicar al candidato" — derecho a explicación (DS 115-2025-PCM) */}
+                                            <button
+                                                onClick={() =>
+                                                    setExplainTarget({ id: s.candidate_id, name: s.full_name })
+                                                }
+                                                className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-primary transition-colors py-1"
+                                                title="Genera un texto en lenguaje claro para responder al candidato si pregunta por su evaluación"
+                                            >
+                                                <span className="material-symbols-outlined text-[14px]">forum</span>
+                                                Explicar al candidato
+                                            </button>
+
                                         {/* Interview guide toggle */}
                                         {hasGuia && (
-                                            <div className="ml-11">
+                                            <>
                                                 <button
                                                     onClick={() => toggleGuia(s.candidate_id)}
                                                     className="flex items-center gap-1.5 text-[11px] font-semibold text-primary hover:text-blue-600 transition-colors py-1"
@@ -345,7 +415,7 @@ function RankingSection({
                                                     {guiaOpen ? "Ocultar" : "Ver"} preguntas de entrevista
                                                 </button>
                                                 {guiaOpen && (
-                                                    <div className="mt-1.5 space-y-1.5 pl-1 border-l-2 border-primary/20">
+                                                    <div className="mt-1.5 space-y-1.5 pl-1 border-l-2 border-primary/20 w-full">
                                                         {s.guia_entrevista!.map((q, qi) => {
                                                             const meta = QUESTION_TYPE[q.tipo] ?? QUESTION_TYPE["validar_logro"];
                                                             return (
@@ -360,8 +430,9 @@ function RankingSection({
                                                         })}
                                                     </div>
                                                 )}
-                                            </div>
+                                            </>
                                         )}
+                                        </div>
                                     </div>
                                 );
                             })}
@@ -369,6 +440,16 @@ function RankingSection({
                     </>
                 )}
             </div>
+
+            {/* Modal: derecho a explicación (DS 115-2025-PCM) */}
+            {explainTarget && (
+                <ExplainDecisionModal
+                    candidateId={explainTarget.id}
+                    jobId={job.id}
+                    candidateName={explainTarget.name}
+                    onClose={() => setExplainTarget(null)}
+                />
+            )}
         </div>
     );
 }
@@ -402,7 +483,6 @@ interface PipelineTabProps {
 function PipelineTab({ candidates, scoreMap, isAdmin, deleteError, deletingId, updatingStatusId, onStatusChange, onDeleteRequest, onDeleteConfirm, onDeleteCancel, onImportCVs }: PipelineTabProps) {
     const [search, setSearch] = useState("");
     const [sortMode, setSortMode] = useState<"score" | "date" | "name">("score");
-    const [filterMode, setFilterMode] = useState<"all" | "scored" | "unscored">("all");
     const [expandedCols, setExpandedCols] = useState<Set<string>>(new Set());
     const [draggingId, setDraggingId] = useState<string | null>(null);
     const [draggingFromCol, setDraggingFromCol] = useState<string | null>(null);
@@ -416,11 +496,10 @@ function PipelineTab({ candidates, scoreMap, isAdmin, deleteError, deletingId, u
         });
     }
 
-    // Apply search + filter
+    // Apply search filter (score-based filter was removed — felt cluttered;
+    // the "Con score IA" KPI in the header already conveys that information).
     const filtered = candidates.filter(c => {
         if (search && !c.full_name.toLowerCase().includes(search.toLowerCase())) return false;
-        if (filterMode === "scored" && scoreMap[c.id] == null) return false;
-        if (filterMode === "unscored" && scoreMap[c.id] != null) return false;
         return true;
     });
 
@@ -482,33 +561,17 @@ function PipelineTab({ candidates, scoreMap, isAdmin, deleteError, deletingId, u
                     )}
                 </div>
 
-                {/* Sort */}
+                {/* Sort — single compact group, only the dimensions a recruiter actually re-orders by */}
                 <div className="flex items-center gap-1.5">
                     <span className="text-xs text-slate-400">Ordenar:</span>
                     {[
-                        { id: "score", label: "Puntuación" },
+                        { id: "score", label: "Puntaje" },
                         { id: "name",  label: "Nombre" },
                         { id: "date",  label: "Fecha" },
                     ].map(opt => (
                         <button key={opt.id}
                             onClick={() => setSortMode(opt.id as any)}
                             className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${sortMode === opt.id ? "bg-primary text-white" : "bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600"}`}
-                        >
-                            {opt.label}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Filter */}
-                <div className="flex items-center gap-1.5">
-                    {[
-                        { id: "all",     label: "Todos" },
-                        { id: "scored",  label: "Con score" },
-                        { id: "unscored",label: "Sin score" },
-                    ].map(opt => (
-                        <button key={opt.id}
-                            onClick={() => setFilterMode(opt.id as any)}
-                            className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${filterMode === opt.id ? "bg-slate-700 dark:bg-slate-200 text-white dark:text-slate-900" : "bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600"}`}
                         >
                             {opt.label}
                         </button>

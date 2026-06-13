@@ -819,13 +819,32 @@ interface BulkActionBarProps {
 
 function BulkActionBar({ count, working, onStatus, onExport, onClear }: BulkActionBarProps) {
     const [statusOpen, setStatusOpen] = useState(false);
+    // Rechazo masivo en dos pasos: el primer clic arma la confirmación, el
+    // segundo ejecuta. Evita rechazar N candidatos por un clic accidental
+    // (acción destructiva sin modal previo).
+    const [confirmReject, setConfirmReject] = useState(false);
+    const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const ref = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setStatusOpen(false); };
         document.addEventListener("mousedown", h);
-        return () => document.removeEventListener("mousedown", h);
+        return () => {
+            document.removeEventListener("mousedown", h);
+            if (confirmTimer.current) clearTimeout(confirmTimer.current);
+        };
     }, []);
+
+    const handleRejectClick = () => {
+        if (confirmReject) {
+            if (confirmTimer.current) clearTimeout(confirmTimer.current);
+            setConfirmReject(false);
+            onStatus("rejected");
+        } else {
+            setConfirmReject(true);
+            confirmTimer.current = setTimeout(() => setConfirmReject(false), 4000);
+        }
+    };
 
     if (count === 0) return null;
 
@@ -874,17 +893,21 @@ function BulkActionBar({ count, working, onStatus, onExport, onClear }: BulkActi
                     )}
                 </div>
 
-                {/* Quick reject */}
+                {/* Quick reject — requiere doble clic de confirmación */}
                 <button
-                    onClick={() => onStatus("rejected")}
+                    onClick={handleRejectClick}
                     disabled={working}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-sm font-medium transition-colors disabled:opacity-50"
+                    className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50 ${
+                        confirmReject
+                            ? "bg-rose-500 hover:bg-rose-600 text-white"
+                            : "bg-rose-500/20 hover:bg-rose-500/30 text-rose-300"
+                    }`}
                 >
                     {working
                         ? <span className="material-symbols-outlined text-[16px] animate-spin">sync</span>
                         : <span className="material-symbols-outlined text-[16px]">person_off</span>
                     }
-                    Rechazar
+                    {confirmReject ? `¿Rechazar ${count}? Confirmar` : "Rechazar"}
                 </button>
 
                 {/* Export selection */}

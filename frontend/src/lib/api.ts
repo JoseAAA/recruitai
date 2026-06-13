@@ -1,6 +1,10 @@
 import axios from "axios";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Por defecto la API se consume same-origin vía nginx (/api). Esto hace que
+// el frontend funcione igual en localhost y desplegado en un servidor de
+// empresa sin reconfigurar. NEXT_PUBLIC_API_URL queda como override para
+// desarrollo sin nginx (ej. http://localhost:8000).
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
 export const api = axios.create({
     baseURL: `${API_BASE_URL}/api`,
@@ -65,6 +69,7 @@ export interface Candidate {
     email?: string;
     phone?: string;
     linkedin?: string;
+    github?: string;
     summary?: string;
     skills: string[];
     total_experience_years: number;
@@ -217,6 +222,23 @@ export const candidatesApi = {
     updateStatus: (id: string, status: string) =>
         api.patch(`/candidates/${id}/status`, { status }),
 
+    update: (
+        id: string,
+        data: { full_name?: string; email?: string | null; phone?: string | null; linkedin?: string | null; github?: string | null },
+    ) => api.patch<Candidate>(`/candidates/${id}`, data),
+
+    updateExperience: (
+        id: string,
+        entries: Array<{
+            title: string | null;
+            company: string | null;
+            start_date: string | null;
+            end_date: string | null;
+            is_current: boolean;
+            description: string | null;
+        }>,
+    ) => api.put<CandidateDetail>(`/candidates/${id}/experience`, { entries }),
+
     getFile: (id: string, endpoint: "preview" | "download") =>
         api.get(`/candidates/${id}/${endpoint}`, { responseType: "arraybuffer" }),
 };
@@ -276,7 +298,21 @@ export const searchApi = {
         api.get(`/search/compare/${candidateId}/${jobId}`),
 
     stats: () => api.get("/search/stats"),
+
+    /** Genera la explicación amigable de la evaluación IA para entregar al
+     * candidato. Cumple el derecho a explicación del DS 115-2025-PCM. */
+    explainToCandidate: (candidateId: string, jobId: string) =>
+        api.post<CandidateExplanation>(`/search/explain/${candidateId}/${jobId}`),
 };
+
+export interface CandidateExplanation {
+    candidate_id: string;
+    job_id: string;
+    candidate_name: string;
+    job_title: string;
+    explanation_for_candidate: string;
+    generated_at: string;
+}
 
 export const healthApi = {
     check: () => api.get("/health"),
@@ -372,4 +408,40 @@ export const notesApi = {
 
     updateStatus: (candidateId: string, status: string, reason?: string) =>
         api.patch(`/candidates/${candidateId}/status`, { status }),
+};
+
+
+// User management types — admin-only operations exposed via /auth/users.
+export type UserRole = "admin" | "recruiter";
+
+export interface AppUser {
+    id: string;
+    email: string;
+    full_name: string;
+    role: UserRole;
+    is_active: boolean;
+}
+
+export interface CreateUserPayload {
+    email: string;
+    full_name: string;
+    password: string;
+}
+
+export const authApi = {
+    listUsers: () => api.get<AppUser[]>("/auth/users"),
+    createUser: (data: CreateUserPayload, role: UserRole = "recruiter") =>
+        api.post<AppUser>(`/auth/users?role=${role}`, data),
+    deleteUser: (id: string) => api.delete(`/auth/users/${id}`),
+    resetUserPassword: (id: string, newPassword: string) =>
+        api.put(`/auth/users/${id}/password`, { new_password: newPassword }),
+    updateUserRole: (id: string, role: UserRole) =>
+        api.put(`/auth/users/${id}/role`, { role }),
+    updateUserStatus: (id: string, isActive: boolean) =>
+        api.put(`/auth/users/${id}/status`, { is_active: isActive }),
+    changeMyPassword: (currentPassword: string, newPassword: string) =>
+        api.post("/auth/change-password", {
+            current_password: currentPassword,
+            new_password: newPassword,
+        }),
 };

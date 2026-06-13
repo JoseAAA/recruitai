@@ -140,8 +140,12 @@ const CreateVacancy: React.FC = () => {
     const [jobTitle, setJobTitle] = useState("");
     const [department, setDepartment] = useState("");
     const [seniority, setSeniority] = useState("");
-    const [modality, setModality] = useState("hybrid");
+    // Modalidad sin default: el reclutador la elige cuando el documento no la
+    // declara explícitamente. Antes el default "hybrid" generaba falsos
+    // positivos para vacantes de RRHH formales que omiten la modalidad.
+    const [modality, setModality] = useState("");
     const [industry, setIndustry] = useState("");
+    const [location, setLocation] = useState("");
     const [minExperience, setMinExperience] = useState(0);
     const [educationLevel, setEducationLevel] = useState("");
     const [description, setDescription] = useState("");
@@ -207,6 +211,7 @@ const CreateVacancy: React.FC = () => {
             if (data.seniority_level) setSeniority(data.seniority_level);
             if (data.work_modality) setModality(data.work_modality);
             if (data.industry) setIndustry(data.industry);
+            if (data.location) setLocation(data.location);
             if (data.description) setDescription(data.description);
             if (data.min_experience_years) setMinExperience(data.min_experience_years);
             if (data.education_level) setEducationLevel(data.education_level);
@@ -247,6 +252,7 @@ const CreateVacancy: React.FC = () => {
                 seniority_level: seniority || undefined,
                 work_modality: modality || undefined,
                 industry: industry || undefined,
+                location: location || undefined,
                 required_skills: requiredSkills,
                 preferred_skills: preferredSkills,
                 responsibilities: responsibilities.filter(r => r.trim()),
@@ -519,6 +525,7 @@ const CreateVacancy: React.FC = () => {
                                             value={modality}
                                             onChange={e => setModality(e.target.value)}
                                         >
+                                            <option value="">Sin especificar</option>
                                             <option value="onsite">Presencial</option>
                                             <option value="remote">Remoto</option>
                                             <option value="hybrid">Híbrido</option>
@@ -536,6 +543,22 @@ const CreateVacancy: React.FC = () => {
                                             value={industry}
                                             onChange={e => setIndustry(e.target.value)}
                                         />
+                                    </div>
+
+                                    {/* Lugar de trabajo / Ubicación */}
+                                    <div className="space-y-1.5">
+                                        <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wide">
+                                            Lugar de Trabajo
+                                        </label>
+                                        <input
+                                            className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-transparent outline-none shadow-sm"
+                                            placeholder="Ej: Lima — San Isidro, Chinchón, Trujillo..."
+                                            value={location}
+                                            onChange={e => setLocation(e.target.value)}
+                                        />
+                                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                                            Ciudad, distrito o sede declarada en el documento. Útil para filtrar candidatos por geografía.
+                                        </p>
                                     </div>
 
                                     {/* Años experiencia */}

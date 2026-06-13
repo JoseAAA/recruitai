@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { jobsApi, searchApi, JobProfile, MatchResult } from "@/lib/api";
 import { scoreColor } from "@/lib/utils";
+import { AIDecisionBanner } from "@/components/compliance/AIDecisionBanner";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -228,6 +229,7 @@ const JobsList: React.FC = () => {
     const [selectedJob, setSelectedJob] = useState<JobProfile | null>(null);
     const [matches, setMatches] = useState<MatchResult[]>([]);
     const [matchLoading, setMatchLoading] = useState(false);
+    const [matchError, setMatchError] = useState<string | null>(null);
     const [showMatchModal, setShowMatchModal] = useState(false);
     const [matchLimit, setMatchLimit] = useState<number>(10);
     const modalRef = useRef<HTMLDivElement>(null);
@@ -249,29 +251,40 @@ const JobsList: React.FC = () => {
         }
     }
 
-    async function findCandidates(job: JobProfile, limit?: number) {
-        const useLimit = limit ?? matchLimit;
+    // Fetch always with the largest selectable Top N so the user can switch
+    // between 5/10/20 instantly without re-running the LLM match on the
+    // backend. Each backend match call is minutes long when scores aren't
+    // cached — slicing client-side eliminates that wait entirely.
+    const MAX_TOP_N = 20;
+
+    async function findCandidates(job: JobProfile) {
         setSelectedJob(job);
         setShowMatchModal(true);
         setMatchLoading(true);
+        setMatchError(null);
         setMatches([]);
 
         try {
-            const response = await searchApi.match(job.id, useLimit);
+            const response = await searchApi.match(job.id, MAX_TOP_N);
             setMatches(response.data.matches || []);
         } catch (err: any) {
             console.error("Failed to find matches:", err);
             setMatches([]);
+            // Distinguir "falló el análisis" de "no hay candidatos": antes el
+            // error se tragaba y el reclutador veía "Sin candidatos" aunque
+            // sí hubiera CVs cargados.
+            setMatchError(
+                "No se pudo completar el análisis. Puede ser una interrupción temporal " +
+                "del sistema de análisis. Espera unos segundos y vuelve a intentarlo."
+            );
         } finally {
             setMatchLoading(false);
         }
     }
 
-    async function changeLimit(newLimit: number) {
+    function changeLimit(newLimit: number) {
         setMatchLimit(newLimit);
-        if (selectedJob) {
-            await findCandidates(selectedJob, newLimit);
-        }
+        // Pure client-side slice — no LLM round-trip.
     }
 
     if (loading) {
@@ -495,7 +508,7 @@ const JobsList: React.FC = () => {
                             <div>
                                 <div className="flex items-center gap-2 mb-1">
                                     <span className="material-symbols-outlined text-primary text-[20px]">psychology</span>
-                                    <span className="text-xs font-bold text-primary uppercase tracking-wider">Análisis IA con qwen3.5</span>
+                                    <span className="text-xs font-bold text-primary uppercase tracking-wider">Análisis con Inteligencia Artificial</span>
                                 </div>
                                 <h2 className="text-xl font-bold text-slate-900 dark:text-white">
                                     {selectedJob?.title}
@@ -549,6 +562,25 @@ const JobsList: React.FC = () => {
                         <div className="p-6">
                             {matchLoading ? (
                                 <MatchLoadingState candidateCount={selectedJob?.candidate_count} />
+                            ) : matchError ? (
+                                <div className="text-center py-12">
+                                    <span className="material-symbols-outlined text-[56px] text-amber-400 block mb-3">
+                                        error_outline
+                                    </span>
+                                    <h3 className="text-lg font-bold text-slate-800 dark:text-white mb-2">
+                                        El análisis no se completó
+                                    </h3>
+                                    <p className="text-slate-500 text-sm mb-5 max-w-md mx-auto">
+                                        {matchError}
+                                    </p>
+                                    <button
+                                        onClick={() => selectedJob && findCandidates(selectedJob)}
+                                        className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-white text-sm font-semibold rounded-lg hover:bg-primary/90 transition-colors"
+                                    >
+                                        <span className="material-symbols-outlined text-[18px]">refresh</span>
+                                        Reintentar análisis
+                                    </button>
+                                </div>
                             ) : matches.length === 0 ? (
                                 <div className="text-center py-12">
                                     <span className="material-symbols-outlined text-[56px] text-slate-300 dark:text-slate-600 block mb-3">
@@ -573,6 +605,23 @@ const JobsList: React.FC = () => {
                                 </div>
                             ) : (
                                 <>
+                                    {/* DS 115-2025-PCM: intervención humana obligatoria — el banner
+                                        debe estar en TODA vista que muestre un ranking IA */}
+                                    <div className="mb-4">
+                                        <AIDecisionBanner variant="ranking" />
+                                    </div>
+
+                                    {/* DS 115: derecho a explicación — fórmula en lenguaje claro */}
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 px-1">
+                                        <span className="font-semibold">¿Cómo se calcula el puntaje?</span>{" "}
+                                        {(() => {
+                                            const dw: Record<string, number> = { skills: 0.40, experience: 0.35, education: 0.25 };
+                                            for (const d of (selectedJob?.scoring_config ?? [])) dw[d.dimension] = d.weight;
+                                            return `Total = Habilidades (${Math.round(dw.skills * 100)}%) + Experiencia (${Math.round(dw.experience * 100)}%) + Educación (${Math.round(dw.education * 100)}%).`;
+                                        })()}{" "}
+                                        Cada dimensión va de 0 a 100 según qué tan bien el perfil cubre lo que pide la vacante.
+                                    </p>
+
                                     {/* Recommendation summary legend */}
                                     <div className="flex flex-wrap gap-2 mb-5 p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                                         {Object.entries(RECOMMENDATION_META).map(([key, m]) => {
@@ -587,9 +636,9 @@ const JobsList: React.FC = () => {
                                         })}
                                     </div>
 
-                                    {/* Candidate cards */}
+                                    {/* Candidate cards — sliced client-side by Top-N selector */}
                                     <div className="space-y-4">
-                                        {matches.map((match, i) => (
+                                        {matches.slice(0, matchLimit).map((match, i) => (
                                             <CandidateMatchCard key={match.candidate_id} match={match} index={i} />
                                         ))}
                                     </div>
