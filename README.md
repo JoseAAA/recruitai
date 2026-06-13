@@ -48,21 +48,37 @@ RECRUITER_INITIAL_PASSWORD=tu-password-seguro
 
 ### 2. Arrancar
 
+**Usa el script wrapper**, no `docker compose up` directo. El script detecta
+tu `LLM_PROVIDER` y levanta solo los servicios necesarios (Ollama queda apagado
+si usas API cloud, liberando ~3 GB de RAM y la GPU).
+
 ```bash
-docker compose up -d
+# Windows (PowerShell)
+.\scripts\start.ps1
+
+# Linux / macOS
+chmod +x scripts/start.sh
+./scripts/start.sh
 ```
+
+Acciones disponibles: `up` (default), `down`, `restart`, `logs`, `status`.
 
 La primera vez descarga las imágenes de Docker (~2-3 GB). Espera unos minutos.
 
-### 3. Instalar los modelos de IA
+### 3. Instalar el modelo de IA
+
+**Embeddings**: el servicio `embeddings` (TEI) descarga automáticamente el
+modelo `Snowflake/snowflake-arctic-embed-m-v2.0` (~1.2 GB) la primera vez
+que arranca. No requiere intervención.
+
+**Generación (solo si usas Ollama local)**:
 
 ```bash
 # Modelo para extraer datos de CVs y hacer matching (~2.5 GB)
 docker exec recruitai-ollama ollama pull gemma3:4b
-
-# Modelo para embeddings / búsqueda semántica (~270 MB)
-docker exec recruitai-ollama ollama pull nomic-embed-text
 ```
+
+Si usas LLM cloud (Groq/Gemini/OpenAI), te saltas este paso.
 
 ### 4. Acceder
 
@@ -72,9 +88,12 @@ docker exec recruitai-ollama ollama pull nomic-embed-text
 | API Docs (Swagger) | http://localhost:8000/docs |
 | MinIO (archivos) | http://localhost:9001 |
 
-**Usuarios por defecto** (configurados en `.env`):
+**Usuarios por defecto** (contraseñas configuradas en `.env`):
 - Admin: `admin@recruitai.com` / `<ADMIN_INITIAL_PASSWORD>`
-- Reclutador: `recruiter@recruitai.com` / `<RECRUITER_INITIAL_PASSWORD>`
+- Reclutador: `rrhh@recruitai.com` / `<RECRUITER_INITIAL_PASSWORD>`
+
+> ⚠️ Entra siempre por **http://localhost** (la puerta principal). El puerto
+> :3000 es solo para desarrollo.
 
 ---
 
@@ -150,44 +169,59 @@ El pipeline vive **dentro del perfil del puesto**, no como página separada. Est
 
 ---
 
-## Configuración de modelos de IA
+## Cambiar de motor de IA — una sola variable
 
-### Ollama local (por defecto) — privacidad total
+Editas `LLM_PROVIDER` en `.env`, ejecutas el script de arranque y todo se
+ajusta automáticamente: el provider del backend, el masking de PII, y si
+Ollama se levanta o no.
 
-Los datos nunca salen de tu máquina.
+| `LLM_PROVIDER=` | Privacidad | Coste | Velocidad | Hardware | PII masking |
+|---|---|---|---|---|---|
+| `ollama` (default) | 🟢 Total — datos nunca salen | 🟢 Gratis **e ilimitado** | 🟡 Media (limitado por tu GPU) | NVIDIA 6+ GB VRAM | OFF (no se necesita) |
+| `groq` | 🟡 Cloud, no entrenan con tus datos | 🟢 Free tier ~25-30 CVs/día | 🟢 5-10× más rápido | Cualquiera | **ON automático** |
+| `gemini` | 🟡 Cloud Google | 🟡 Free tier **~20 análisis/día por modelo** | 🟢 Rápido | Cualquiera | **ON automático** |
+| `openai` | 🟡 Cloud OpenAI | 🟡 Más caro | 🟢 Rápido | Cualquiera | **ON automático** |
 
-```env
-LLM_PROVIDER=ollama
-EXTRACTION_MODEL=gemma3:4b      # Lee y estructura los CVs
-MATCH_MODEL=gemma3:4b           # Evalúa candidatos vs vacante
-EMBEDDING_MODEL=nomic-embed-text
-```
+> 💡 **Para probar el sistema con volumen real de CVs, usa `ollama` (gratis e
+> ilimitado).** Las cuotas gratuitas de la nube alcanzan para demos puntuales,
+> no para un día de trabajo de RRHH — Google además las recorta sin aviso.
 
-**Modelos alternativos:**
+### Cómo cambiar (3 pasos)
 
-| Modelo | VRAM | Velocidad | Calidad |
-|--------|------|-----------|---------|
-| `gemma3:4b` (defecto) | ~3 GB | Media | Buena |
-| `qwen2.5:3b` | ~2 GB | Rápida | Aceptable |
-| `llama3.2:3b` | ~2 GB | Rápida | Aceptable |
+1. Edita `.env`:
+   ```env
+   LLM_PROVIDER=groq          # o gemini, openai, ollama
+   GROQ_API_KEY=gsk_...       # solo si elegiste un proveedor cloud
+   ```
 
-```bash
-docker exec recruitai-ollama ollama pull qwen2.5:3b
-# Actualizar EXTRACTION_MODEL y MATCH_MODEL en .env
-docker restart recruitai-backend
-```
+2. Ejecuta el script:
+   ```bash
+   .\scripts\start.ps1 restart    # Windows
+   ./scripts/start.sh restart     # Linux/macOS
+   ```
 
-### Gemini (nube) — más rápido, sin GPU
+3. El script detecta el provider y:
+   - Si es **cloud**: apaga Ollama (libera ~3 GB RAM + toda la VRAM), activa PII masking, valida que la API key esté presente.
+   - Si es **ollama**: levanta el contenedor Ollama con GPU, desactiva PII masking (no se necesita en local), activa el profile `local-llm`.
 
-```env
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=tu-api-key-aqui
-GEMINI_MODEL=gemini-2.0-flash
-PII_MASKING_ENABLED=true   # Anonimiza datos antes de enviar a la nube
-```
+Si te falta la API key cuando intentas usar cloud, el script y el backend
+**fallan rápido con un mensaje claro** — no hay fallback silencioso a Ollama.
 
-Obtén tu API Key gratis en [aistudio.google.com](https://aistudio.google.com).
-Tier gratuito: 1,500 requests/día — suficiente para ~500 CVs/día.
+### Dónde obtener cada API key
+
+- **Groq**: https://console.groq.com — rapidísimo, modelos open, free tier moderado
+- **Gemini**: https://aistudio.google.com/apikey — free tier pequeño (~20 análisis/día por modelo); verifica TU cuota real en AI Studio
+- **OpenAI**: https://platform.openai.com/api-keys — sin free tier, máxima calidad
+
+### Modelos por defecto (opcionales en `.env`)
+
+| Variable | Default | Para qué |
+|---|---|---|
+| `OLLAMA_MODEL` | `gemma3:4b` | Modelo único para extracción + matching local |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Modelo Groq |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Modelo Gemini — ojo: Google retira modelos rápido (2.0-flash murió 01-jun-2026); alternativas: `gemini-3.5-flash` (mejor), `gemini-3.1-flash-lite` (más cuota gratis) |
+| `GEMINI_MIN_REQUEST_INTERVAL` | `6.0` | Segundos entre llamadas a Gemini (respeta la cuota gratuita). Pon `0` si pagas |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Modelo OpenAI |
 
 ---
 
@@ -272,12 +306,19 @@ Navegador → http://localhost
    Next.js :3000    FastAPI :8000
    (UI / frontend)  (API + MCP Server)
                         │
-          ┌─────────────┼──────────────┬──────────┐
-          ▼             ▼              ▼           ▼
-     PostgreSQL      Qdrant          MinIO       Ollama
-     (datos          (vectores       (archivos   (LLM
-     relacionales)   semánticos)     CV/PDF)     local)
+   ┌──────────┬─────────┼─────────┬──────────┬───────────────┐
+   ▼          ▼         ▼         ▼          ▼               ▼
+PostgreSQL  Qdrant    MinIO    Embeddings   Ollama       Cloud LLM
+(datos)    (vectores) (archivos) (TEI       (LLM local,  (Groq/Gemini/
+                                arctic-     opcional —    OpenAI —
+                                embed-m,    profile       opcional)
+                                768d)       local-llm)
+           SIEMPRE   SIEMPRE   SIEMPRE     según .env    según .env
 ```
+
+**Separación embeddings ↔ LLM** (patrón "separation of inference services"):
+el servicio de embeddings corre independiente del LLM. Esto permite cambiar
+el LLM entre Ollama local y APIs cloud sin afectar la búsqueda semántica.
 
 **Stack:**
 - Backend: Python 3.11, FastAPI, SQLAlchemy async, Pydantic v2, `slowapi` rate limiting
@@ -333,6 +374,15 @@ PII_MASKING_ENABLED=true
 ---
 
 ## Solución de problemas
+
+**"No se pudo conectar con el servidor" al iniciar sesión**
+Estás entrando por una URL incorrecta o los servicios no están arriba.
+Entra por **http://localhost** y verifica con `.\scripts\start.ps1 status`.
+
+**"El sistema de análisis está saturado" al subir CVs o analizar**
+La cuota gratuita del proveedor de IA en la nube se agotó (Gemini free:
+~20 análisis/día por modelo). Espera unos minutos, cambia de modelo en
+`GEMINI_MODEL`, o usa `LLM_PROVIDER=ollama` (sin límites).
 
 **El frontend no muestra los cambios tras editar código (Windows)**
 ```bash

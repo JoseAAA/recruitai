@@ -82,3 +82,6 @@ build/
 certs/
 *.crt
 *.pem
+
+# AI assistants (config local personal)
+.claude/
