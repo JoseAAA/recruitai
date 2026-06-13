@@ -15,6 +15,7 @@ from app.adapters import DocumentExtractor, EmbeddingService, LLMEngine
 from app.api.routes.auth import get_current_active_user, UserResponse
 from app.core.database import get_db
 from app.core.privacy import AuditLogger, get_audit_logger
+from app.core.usage import LLMUsageRecorder, get_usage_recorder
 from app.core.validators import validate_pdf_bytes, validate_docx_bytes
 from app.db.models import CandidateDB, JobProfileDB
 from app.domain import DEFAULT_SCORING_CONFIG, EducationLevel, JobStatus, ScoringDimension
@@ -210,6 +211,7 @@ async def analyze_job_description(
     current_user: UserResponse = Depends(get_current_active_user),
     parser: DocumentExtractor = Depends(get_document_parser),
     llm: LLMEngine = Depends(get_llm_engine),
+    recorder: LLMUsageRecorder = Depends(get_usage_recorder),
 ):
     """
     Analyze a job description and extract structured requirements.
@@ -278,8 +280,17 @@ async def analyze_job_description(
 
     try:
         # Extract using LLM
-        extracted = await llm.extract_job_profile(text)
-        
+        job_usage: dict = {}
+        extracted = await llm.extract_job_profile(text, usage_out=job_usage)
+
+        # Consumo del LLM al analizar la vacante. job_id es None: la vacante aún
+        # no existe (este paso es para revisión humana antes de crearla).
+        await recorder.record(
+            operation="extract_job",
+            usage=job_usage,
+            user_id=str(current_user.id),
+        )
+
         return ExtractedSkillsResponse(
             title=extracted.title,
             department=extracted.department,

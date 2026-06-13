@@ -12,6 +12,7 @@ Security Features:
 import json
 import logging
 import re
+import time
 import unicodedata
 from typing import Optional, Type, TypeVar, Dict, Tuple
 
@@ -533,6 +534,38 @@ class LLMEngine:
 
         return True
     
+    def _fill_usage(
+        self,
+        usage_out: Optional[dict],
+        provider: "LLMProvider",
+        latency_ms: int,
+        success: bool = True,
+    ) -> None:
+        """Vuelca en ``usage_out`` los tokens reales del proveedor + la latencia.
+
+        Patrón seguro ante concurrencia: el llamador (motor) lee
+        ``provider.last_usage`` **inmediatamente** después de que ``generate()``
+        retorna, sin ningún ``await`` intermedio, por lo que ninguna otra
+        corrutina puede sobreescribir el atributo del singleton entre medias.
+        ``usage_out`` es siempre propiedad del llamador (uno por llamada), así
+        que tampoco se comparte entre tareas concurrentes del matching.
+
+        Si ``usage_out`` es None (el llamador no quiere medir), no hace nada.
+        """
+        if usage_out is None:
+            return
+        u = getattr(provider, "last_usage", None) or {}
+        usage_out.update(
+            {
+                "provider": (settings.LLM_PROVIDER or "").lower(),
+                "model": getattr(provider, "model", None),
+                "input_tokens": u.get("input_tokens"),
+                "output_tokens": u.get("output_tokens"),
+                "latency_ms": latency_ms,
+                "success": success,
+            }
+        )
+
     def _extract_resume_simple(self, text: str, filename: str = "") -> ExtractedResume:
         """
         Enhanced regex-based resume extraction as fallback.
@@ -948,6 +981,7 @@ TEXTO DEL CV A ANALIZAR:
         text: str,
         filename: str = "",
         hidden_fragments: list[str] | None = None,
+        usage_out: Optional[dict] = None,
     ) -> ExtractedResume:
         """Extract structured resume data from raw text (Markdown via pymupdf4llm).
 
@@ -958,6 +992,10 @@ TEXTO DEL CV A ANALIZAR:
                               (white text, micro-font, off-page, metadata).
                               These are passed to sanitize_input() so injection
                               patterns are checked even against invisible content.
+            usage_out:        Si se provee un dict, el motor vuelca aquí los
+                              tokens reales + latencia de la llamada al LLM
+                              (para registrar consumo en ``llm_usage``). Ver
+                              ``_fill_usage``.
         """
         extraction_model = getattr(settings, "EXTRACTION_MODEL", None)
 
@@ -996,6 +1034,7 @@ TEXTO DEL CV A ANALIZAR:
                 # un CV de 1 página reservaba 8192 y agotaba la cuota solo.
                 # Piso 2500 (CVs cortos con muchos logros), techo 8192 (CVs 9+ págs).
                 _max_out = min(8192, max(2500, len(sanitized_text) // 3))
+                _t0 = time.perf_counter()
                 raw_output = await provider_to_use.generate(
                     prompt=prompt,
                     system_prompt=system_msg,
@@ -1009,6 +1048,10 @@ TEXTO DEL CV A ANALIZAR:
                     temperature=0.1,
                     max_tokens=_max_out
                 )
+                # Capturamos tokens+latencia AQUÍ, antes del finally (que puede
+                # cerrar un provider temporal), sin await intermedio → seguro
+                # ante concurrencia.
+                self._fill_usage(usage_out, provider_to_use, int((time.perf_counter() - _t0) * 1000))
             finally:
                 if needs_close:
                     await provider_to_use.close()
@@ -1876,7 +1919,9 @@ TEXTO DEL CV A ANALIZAR:
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text
 
-    async def extract_job_profile(self, text: str) -> ExtractedJobProfile:
+    async def extract_job_profile(
+        self, text: str, usage_out: Optional[dict] = None
+    ) -> ExtractedJobProfile:
         """Extract structured job description data using an example-based prompt."""
         if not await self._is_provider_available():
             raise ValueError("LLM provider not available")
@@ -1895,6 +1940,7 @@ TEXTO DEL CV A ANALIZAR:
         system_msg = _render_prompt("extract_job_system")
 
         try:
+            _t0 = time.perf_counter()
             raw = await self.provider.generate(
                 prompt=prompt,
                 system_prompt=system_msg,
@@ -1903,6 +1949,7 @@ TEXTO DEL CV A ANALIZAR:
                 temperature=0.1,
                 max_tokens=2048,
             )
+            self._fill_usage(usage_out, self.provider, int((time.perf_counter() - _t0) * 1000))
             # Strip any markdown code fences if present
             raw = raw.strip()
             if raw.startswith("```"):
@@ -2083,6 +2130,7 @@ TEXTO DEL CV A ANALIZAR:
         candidate_education: list[dict] | None = None,
         candidate_languages: list[dict] | None = None,
         candidate_summary: str | None = None,
+        usage_out: Optional[dict] = None,
     ) -> dict:
         """Evalúa el fit candidato-puesto usando razonamiento estructurado del LLM.
 
@@ -2250,6 +2298,7 @@ TEXTO DEL CV A ANALIZAR:
             # max_tokens=4000: cubre el JSON de salida con margen para thinking
             # de modelos como qwen3 (OLLAMA_THINKING=true). Con 2500, Gemini
             # 2.5 Flash quemaba el presupuesto pensando y truncaba el JSON.
+            _t0 = time.perf_counter()
             raw = await self.provider.generate(
                 prompt=prompt,
                 system_prompt=system_msg,
@@ -2258,6 +2307,7 @@ TEXTO DEL CV A ANALIZAR:
                 temperature=0.0,
                 max_tokens=4000,
             )
+            self._fill_usage(usage_out, self.provider, int((time.perf_counter() - _t0) * 1000))
 
             # Belt-and-suspenders: strip any thinking tags that might leak through
             raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
@@ -2368,6 +2418,7 @@ TEXTO DEL CV A ANALIZAR:
         explanation_internal: str,
         missing_skills: list,
         bonus_skills: list,
+        usage_out: Optional[dict] = None,
     ) -> str:
         """Reformula la explicación interna del matching en lenguaje accesible
         dirigido al candidato.
@@ -2444,6 +2495,7 @@ TEXTO DEL CV A ANALIZAR:
         )
 
         try:
+            _t0 = time.perf_counter()
             response = await self.provider.generate(
                 prompt=user_msg,
                 system_prompt=system_msg,
@@ -2451,6 +2503,7 @@ TEXTO DEL CV A ANALIZAR:
                 max_tokens=600,
                 json_mode=False,
             )
+            self._fill_usage(usage_out, self.provider, int((time.perf_counter() - _t0) * 1000))
             text = (response or "").strip()
             # Output scanning: si el LLM emitió algo sospechoso, no lo enviamos
             # — devolvemos el fallback determinístico en su lugar.

@@ -21,6 +21,7 @@ from app.adapters.llm_engine import PromptInjectionError
 from app.adapters.llm_providers import LLMRateLimitError
 from app.adapters.storage import StorageService, BUCKET_CVS
 from app.core.privacy import AuditLogger, get_audit_logger
+from app.core.usage import LLMUsageRecorder, get_usage_recorder
 from app.adapters.document_extractor import DocumentExtractor, DocumentParsingError
 from app.api.routes.auth import get_current_active_user, UserResponse
 from app.core.database import get_db
@@ -245,6 +246,7 @@ async def upload_cv(
     current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
     audit: AuditLogger = Depends(get_audit_logger),
+    recorder: LLMUsageRecorder = Depends(get_usage_recorder),
     embedder: EmbeddingService = Depends(get_embedding_service),
     llm: LLMEngine = Depends(get_llm_engine),
     qdrant: QdrantRepository = Depends(get_qdrant_repo),
@@ -326,10 +328,17 @@ async def upload_cv(
         logger.info(f"LLM_PROVIDER: {settings.LLM_PROVIDER}, EXTRACTION_MODEL: {getattr(settings, 'EXTRACTION_MODEL', 'Not set')}")
         
         # 1. Convert to Markdown using document extractor (PDF security scan included)
+        # Medimos el tiempo de lectura del documento (preprocess_ms) por separado
+        # del tiempo del LLM, para el KPI "tiempo total de procesar un CV".
+        import time as _time
         hidden_fragments: list[str] = []
+        preprocess_ms: int = 0
+        extraction_usage: dict = {}
         try:
             logger.info(f"Starting document extraction for {filename}")
+            _parse_t0 = _time.perf_counter()
             markdown_content, doc_meta = await docling.parse_bytes(content, filename)
+            preprocess_ms = int((_time.perf_counter() - _parse_t0) * 1000)
             raw_text = markdown_content
             hidden_fragments = doc_meta.get("hidden_text_fragments", [])
             sec_warnings = doc_meta.get("security_warnings", [])
@@ -383,7 +392,8 @@ async def upload_cv(
         try:
             logger.info(f"Starting LLM extraction for {filename}")
             extracted = await llm.extract_resume(
-                raw_text, filename=filename, hidden_fragments=hidden_fragments
+                raw_text, filename=filename, hidden_fragments=hidden_fragments,
+                usage_out=extraction_usage,
             )
             logger.info("JSON extraction successful")
         except PromptInjectionError as e:
@@ -640,6 +650,18 @@ async def upload_cv(
                 "job_id": str(job_id) if job_id else None,
                 "file_hash": file_hash[:16],  # prefijo, no completo (no es secreto pero evita ruido)
             },
+        )
+
+        # Consumo del LLM en la extracción (tokens reales + latencia + tiempo de
+        # lectura del documento). Alimenta KPIs de costo/tiempo por CV en
+        # /admin/usage. Nunca rompe el upload (el recorder hace try/except).
+        await recorder.record(
+            operation="extract_cv",
+            usage=extraction_usage,
+            candidate_id=candidate_db.id,
+            job_id=job_id,
+            user_id=str(current_user.id),
+            preprocess_ms=preprocess_ms,
         )
 
         return UploadResponse(

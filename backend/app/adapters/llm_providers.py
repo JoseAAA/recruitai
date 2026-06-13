@@ -29,7 +29,16 @@ class LLMRateLimitError(Exception):
 
 
 class LLMProvider(ABC):
-    """Abstract base class for LLM providers."""
+    """Abstract base class for LLM providers.
+
+    Atributo ``last_usage``: tras cada ``generate()`` exitoso, el proveedor
+    deja aquí los tokens reales reportados por su API:
+    ``{"input_tokens": int, "output_tokens": int}`` (o ``None`` si la API no
+    los devolvió). Las rutas lo leen para registrar consumo en ``llm_usage``
+    (auditoría de costos por candidato/vacante).
+    """
+
+    last_usage: Optional[dict] = None
     
     @abstractmethod
     async def generate(
@@ -218,12 +227,18 @@ class OllamaProvider(LLMProvider):
         elif json_mode:
             request_body["format"] = "json"
         
+        self.last_usage = None
         response = await self.client.post(
             f"{self.base_url}/api/chat",
             json=request_body
         )
         response.raise_for_status()
         data = response.json()
+        if "prompt_eval_count" in data or "eval_count" in data:
+            self.last_usage = {
+                "input_tokens": data.get("prompt_eval_count", 0),
+                "output_tokens": data.get("eval_count", 0),
+            }
 
         # /api/chat returns {"message": {"role": "assistant", "content": "...", "thinking": "..."}}
         # qwen3.5 uses a separate "thinking" field for chain-of-thought reasoning.
@@ -324,6 +339,7 @@ class OpenAIProvider(LLMProvider):
         # degradaba a extracción regex con datos corruptos.
         RETRYABLE = {429, 500, 502, 503, 504}
         max_attempts = 3
+        self.last_usage = None
         for attempt in range(max_attempts):
             response = await self.client.post(
                 f"{self.base_url}/chat/completions",
@@ -348,6 +364,12 @@ class OpenAIProvider(LLMProvider):
                 )
             response.raise_for_status()
             data = response.json()
+            usage = data.get("usage") or {}
+            if usage:
+                self.last_usage = {
+                    "input_tokens": usage.get("prompt_tokens", 0),
+                    "output_tokens": usage.get("completion_tokens", 0),
+                }
             return data["choices"][0]["message"]["content"]
 
 
@@ -512,6 +534,7 @@ class GeminiProvider(LLMProvider):
         RETRYABLE = {429, 500, 502, 503, 504}
 
         last_error = None
+        self.last_usage = None
         for attempt in range(max_retries):
             try:
                 await self._pace()
@@ -531,6 +554,17 @@ class GeminiProvider(LLMProvider):
 
                 response.raise_for_status()
                 data = response.json()
+
+                # Tokens reales reportados por la API (mismo contrato que
+                # Ollama/OpenAI: input_tokens/output_tokens). Gemini cuenta el
+                # "thinking" dentro de candidatesTokenCount, por eso registramos
+                # también el total para el costeo en llm_usage.
+                meta = data.get("usageMetadata") or {}
+                if meta:
+                    self.last_usage = {
+                        "input_tokens": meta.get("promptTokenCount", 0),
+                        "output_tokens": meta.get("candidatesTokenCount", 0),
+                    }
 
                 # Extract text from Gemini response structure
                 try:

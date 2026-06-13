@@ -215,6 +215,62 @@ class MatchResultDB(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 
 
+class LLMUsageDB(Base):
+    """Registro de consumo del LLM por operación — base de KPIs/OKRs y costeo.
+
+    Cada llamada al LLM (extracción de CV, matching, explicación al candidato,
+    análisis de vacante) deja aquí una fila con los **tokens reales** que
+    reportó la API del proveedor y la **latencia** medida en el servidor. Sirve
+    para responder preguntas de negocio: ¿cuánto cuesta procesar un CV?, ¿cuánto
+    tarda un análisis IA?, ¿qué proveedor conviene?
+
+    Diseño "write-only / analytics" igual que ``audit_logs``:
+    - ``candidate_id`` / ``job_id`` son UUID nullable **sin** ForeignKey, para
+      que borrar un candidato o una vacante nunca elimine el historial de
+      consumo ni falle por una constraint. La trazabilidad de costos sobrevive
+      a los derechos ARCO-P.
+    - Las filas no se editan ni se borran (salvo retención por LPDP).
+
+    Indexado por ``operation``, ``provider`` y ``created_at`` para que las
+    agregaciones del panel ``/admin/usage`` sean baratas.
+    """
+    __tablename__ = "llm_usage"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), index=True
+    )
+    # extract_cv | match | explain | extract_job
+    operation: Mapped[str] = mapped_column(String(20), index=True)
+    # ollama | openai | gemini | groq
+    provider: Mapped[str] = mapped_column(String(20), index=True)
+    model: Mapped[Optional[str]] = mapped_column(String(80))
+
+    # Tokens reales devueltos por la API del proveedor (None si no los reportó).
+    input_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+    output_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+    total_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Latencia de la llamada al LLM (wall-clock, incluye reintentos del proveedor).
+    latency_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    # Tiempo de pre-procesado del documento antes del LLM (solo extract_cv):
+    # leer el PDF/DOCX y convertirlo a Markdown. Permite el KPI "tiempo total
+    # de procesar un CV" = preprocess_ms + latency_ms.
+    preprocess_ms: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Contexto de negocio (nullable, sin FK — ver docstring).
+    candidate_id: Mapped[Optional[UUID]] = mapped_column(PGUUID(as_uuid=True), index=True)
+    job_id: Mapped[Optional[UUID]] = mapped_column(PGUUID(as_uuid=True), index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(255))
+    # Agrupa todas las filas de una misma ejecución de matching (N candidatos).
+    batch_id: Mapped[Optional[UUID]] = mapped_column(PGUUID(as_uuid=True), index=True)
+
+    # ¿La llamada al LLM tuvo éxito? success=False registra fallos (cuota
+    # agotada, timeouts) para medir la tasa de error sin inflar el costo.
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_type: Mapped[Optional[str]] = mapped_column(String(80))
+
+
 class SystemSettingDB(Base):
     """
     System settings stored in database.

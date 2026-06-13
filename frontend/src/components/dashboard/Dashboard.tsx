@@ -108,13 +108,9 @@ const Dashboard = () => {
                             </h2>
                             <p className="text-xs text-slate-400">Últimos candidatos procesados</p>
                         </div>
-                        <Link
-                            href="/candidates"
-                            className="text-xs text-primary hover:underline font-medium flex items-center gap-1"
-                        >
-                            Ver todos
-                            <span className="material-symbols-outlined text-[14px]">arrow_forward</span>
-                        </Link>
+                        {/* "Ver todos" eliminado: el panel global /candidates ya no existe;
+                            los candidatos se gestionan dentro de cada perfil de puesto. Cada
+                            candidato de abajo sigue enlazando a su ficha (/candidates/[id]). */}
                     </div>
 
                     {stats.recent_candidates.length > 0 ? (
@@ -272,10 +268,8 @@ const Dashboard = () => {
                                 )}
                             </p>
                         </div>
-                        <Link href="/candidates" className="text-xs text-primary hover:underline font-medium flex items-center gap-1">
-                            Ver todos
-                            <span className="material-symbols-outlined text-[14px]">arrow_forward</span>
-                        </Link>
+                        {/* "Ver todos" eliminado: el panel global /candidates ya no existe.
+                            Cada candidato destacado enlaza a su ficha (/candidates/[id]). */}
                     </div>
 
                     {/* Star candidates alert strip */}

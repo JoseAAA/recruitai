@@ -5,7 +5,7 @@ import asyncio
 import logging
 import re
 from typing import List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -20,6 +20,7 @@ from app.adapters.llm_providers import LLMRateLimitError
 from app.core.database import get_db
 from app.core.config import settings
 from app.core.privacy import AuditLogger, get_audit_logger
+from app.core.usage import LLMUsageRecorder, get_usage_recorder
 from app.db.models import CandidateDB, JobProfileDB, MatchResultDB
 from app.domain import DEFAULT_SCORING_CONFIG, ScoringService
 from app.api.routes.auth import get_current_active_user, UserResponse
@@ -27,6 +28,37 @@ from app.api.routes.auth import get_current_active_user, UserResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/search", tags=["Search & Matching"])
+
+
+# ── Recomendación coherente con el Score Global ───────────────────────────────
+# La etiqueta de recomendación se DERIVA del Score Global, NO de la etiqueta
+# libre que devuelve el LLM. Antes se confiaba en el LLM y resultaba incoherente:
+# producía, por ejemplo, "Considerar" para un candidato con 100/100/100 mientras
+# otro idéntico recibía "Altamente recomendado". El Score Global ya pondera
+# skills/experiencia/educación con los pesos que el reclutador define por vacante
+# (ver compute_overall), así que derivar la etiqueta de ese número garantiza que:
+#   (a) el mismo puntaje produzca siempre la misma etiqueta, y
+#   (b) el orden sea intuitivo (más puntaje ⇒ etiqueta igual o mejor).
+# Umbrales elegidos para corregir la incoherencia sin reclasificar perfiles que
+# ya estaban bien. Es solo una SUGERENCIA: la decisión final la toma una persona
+# (intervención humana obligatoria, DS 115-2025-PCM).
+RECOMMENDATION_THRESHOLDS: list[tuple[float, str]] = [
+    (85, "Altamente recomendado"),
+    (65, "Buena opción"),
+    (30, "Considerar"),
+]
+
+
+def recommendation_from_overall(overall_score: float) -> str:
+    """Mapea el Score Global (0-100) a una etiqueta de recomendación coherente.
+
+    Recorre los umbrales de mayor a menor y devuelve el primero que se cumple.
+    Por debajo del umbral más bajo, "No recomendado".
+    """
+    for cutoff, label in RECOMMENDATION_THRESHOLDS:
+        if overall_score >= cutoff:
+            return label
+    return "No recomendado"
 
 
 # ============ Request/Response Schemas ============
@@ -239,6 +271,7 @@ async def match_candidates_to_job(
     current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
     audit: AuditLogger = Depends(get_audit_logger),
+    recorder: LLMUsageRecorder = Depends(get_usage_recorder),
     qdrant: QdrantRepository = Depends(get_qdrant_repo),
     embedder: EmbeddingService = Depends(get_embedding_service),
     llm: LLMEngine = Depends(get_llm_engine),
@@ -539,6 +572,14 @@ async def match_candidates_to_job(
     # re-evalúa de verdad en lugar de servir basura desde el caché.
     degraded_ids: set[str] = set()
 
+    # Consumo del LLM por candidato (tokens+latencia). Se rellena dentro de
+    # _score_candidate (cada tarea escribe SU clave → seguro entre corrutinas
+    # concurrentes) y se persiste DESPUÉS del gather, en la corrutina principal,
+    # para no tocar la sesión DB desde tareas paralelas (igual que match_results).
+    # batch_id agrupa todas las filas de esta ejecución de matching (1 "análisis").
+    run_id = uuid4()
+    usage_by_candidate: dict[str, dict] = {}
+
     async def _score_candidate(candidate: CandidateDB) -> MatchResultResponse:
         async with _sem:
             candidate_skills_lower = set(s.lower() for s in (candidate.skills or []))
@@ -548,6 +589,7 @@ async def match_candidates_to_job(
             # competencia profesional, no identidad. ``summary`` se envía si
             # existe y se asume libre de PII (lo extrae el LLM en upload con
             # masking activo cuando aplica).
+            usage_out: dict = {}
             try:
                 reasoning = await llm.reason_candidate_match(
                     candidate_skills=candidate.skills or [],
@@ -560,9 +602,30 @@ async def match_candidates_to_job(
                     candidate_education=_build_education_payload(candidate),
                     candidate_languages=candidate.idiomas or None,
                     candidate_summary=candidate.summary,
+                    usage_out=usage_out,
                 )
+                # Si usage_out quedó vacío, reason_candidate_match cayó a su
+                # fallback determinista (sin llamar al LLM, p. ej. proveedor no
+                # disponible) → 0 tokens. Lo marcamos como no-éxito para no
+                # contar una "llamada IA exitosa" de 0 tokens que ensucie KPIs.
+                if not usage_out.get("provider"):
+                    usage_out = {
+                        "provider": (settings.LLM_PROVIDER or "").lower(),
+                        "success": False,
+                        "error_type": "fallback_sin_llm",
+                    }
+                # Cada tarea escribe SU propia clave → seguro sin lock.
+                usage_by_candidate[str(candidate.id)] = usage_out
             except LLMRateLimitError:
                 degraded_ids.add(str(candidate.id))
+                # Registra el fallo (cuota agotada) para medir tasa de error,
+                # sin tokens ni costo asociados.
+                usage_by_candidate[str(candidate.id)] = {
+                    **usage_out,
+                    "provider": (settings.LLM_PROVIDER or "").lower(),
+                    "success": False,
+                    "error_type": "rate_limit",
+                }
                 logger.warning(
                     f"Match sin IA para {candidate.id} (cuota agotada) — "
                     "marcado como pendiente, no se persiste"
@@ -585,15 +648,15 @@ async def match_candidates_to_job(
             experience_score = reasoning["experience_score"]
             education_score  = reasoning["education_score"]
             explanation      = reasoning["explanation"]
-            recommendation   = reasoning["recommendation"]
             overall_score    = compute_overall(skills_score, experience_score, education_score)
 
-            # Coherencia puntaje↔etiqueta: el LLM a veces dice "Considerar"
-            # con un total de 11/100, lo que confunde al reclutador. Regla
-            # solo-degradante (nunca sube una recomendación): total < 30 ⇒
-            # "No recomendado". La decisión final sigue siendo humana (DS 115).
-            if overall_score < 30 and recommendation != "No recomendado":
-                recommendation = "No recomendado"
+            # Recomendación DERIVADA del Score Global (ver recommendation_from_overall
+            # arriba). Antes se usaba reasoning["recommendation"] —la etiqueta libre
+            # del LLM—, que era incoherente con el número. Ahora la etiqueta es
+            # siempre coherente con el Score Global, que respeta los pesos que el
+            # reclutador definió para la vacante. La decisión final sigue siendo
+            # humana (DS 115-2025-PCM).
+            recommendation = recommendation_from_overall(overall_score)
 
             missing = [
                 s for s in (job.required_skills or [])
@@ -780,6 +843,30 @@ async def match_candidates_to_job(
         },
     )
 
+    # Consumo del LLM de esta ejecución de matching: 1 fila por candidato
+    # evaluado con IA (los servidos desde caché no llaman al LLM, no consumen).
+    # Se escribe en lote en la corrutina principal (no en las tareas paralelas)
+    # y en un bloque aislado: si falla, el ranking ya está devuelto y no se ve
+    # afectado. batch_id=run_id agrupa todo este "análisis" para el panel.
+    if usage_by_candidate:
+        try:
+            for cid, u in usage_by_candidate.items():
+                await recorder.record(
+                    operation="match",
+                    usage=u,
+                    candidate_id=cid,
+                    job_id=request.job_id,
+                    user_id=str(current_user.id),
+                    batch_id=run_id,
+                    success=u.get("success", True),
+                    error_type=u.get("error_type"),
+                    commit=False,
+                )
+            await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to persist llm_usage for match batch {run_id}: {e}")
+            await db.rollback()
+
     return MatchResponse(
         job_id=job.id,
         job_title=job.title,
@@ -873,6 +960,7 @@ async def explain_decision_to_candidate(
     current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
     audit: AuditLogger = Depends(get_audit_logger),
+    recorder: LLMUsageRecorder = Depends(get_usage_recorder),
     llm: LLMEngine = Depends(get_llm_engine),
 ):
     """Genera la explicación de la evaluación IA en lenguaje accesible al candidato.
@@ -916,6 +1004,7 @@ async def explain_decision_to_candidate(
 
     candidate_name = match.candidate_name or "candidato"
 
+    explanation_usage: dict = {}
     explanation_text = await llm.explain_for_candidate(
         candidate_name=candidate_name,
         job_title=job.title,
@@ -924,6 +1013,7 @@ async def explain_decision_to_candidate(
         explanation_internal=match.explanation or "",
         missing_skills=match.missing_skills or [],
         bonus_skills=match.bonus_skills or [],
+        usage_out=explanation_usage,
     )
 
     # Auditoría: ejercicio del derecho a explicación.
@@ -937,6 +1027,15 @@ async def explain_decision_to_candidate(
             "job_title": job.title,
             "candidate_name": candidate_name,
         },
+    )
+
+    # Consumo del LLM en la explicación al candidato (derecho a explicación).
+    await recorder.record(
+        operation="explain",
+        usage=explanation_usage,
+        candidate_id=candidate_id,
+        job_id=job_id,
+        user_id=str(current_user.id),
     )
 
     return CandidateExplanationResponse(
