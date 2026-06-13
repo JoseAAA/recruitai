@@ -351,6 +351,39 @@ estás ahí**.
 **Nunca**: usar el viejo singleton (`get_audit_logger()` sin args como import
 directo) — fue removido. Usar siempre la dependency `Depends(get_audit_logger)`.
 
+### Observabilidad de consumo LLM (tokens, tiempo, costo) — KPIs/OKRs
+
+Tabla `llm_usage` (PostgreSQL) + módulo `app/core/usage.py`. Cada llamada al LLM
+(extracción de CV, matching, explicación, análisis de vacante) registra los
+**tokens reales** que reportó la API del proveedor + la **latencia** medida en
+el servidor + contexto de negocio (candidato, vacante, usuario, `batch_id` del
+análisis). Base de los KPIs de costo/tiempo por operación.
+
+- **Cómo capturarlo**: los métodos del `LLMEngine` aceptan `usage_out: dict`.
+  El motor lo rellena con `_fill_usage()` **justo después** de `generate()` (sin
+  `await` intermedio → seguro ante concurrencia; `provider.last_usage` es un
+  singleton compartido). La ruta lo persiste con
+  `LLMUsageRecorder` (`Depends(get_usage_recorder)`), patrón gemelo de
+  `AuditLogger`: nunca rompe la operación (try/except interno).
+- **En el matching** (concurrente con `asyncio.gather`): NO escribir a la
+  sesión DB desde las tareas. Cada tarea llena su `usage_out` y lo guarda en un
+  dict por `candidate_id`; el lote se persiste DESPUÉS del gather en la
+  corrutina principal (igual que `match_results`).
+- **Fila marcada `success=False`** cuando la operación cayó al fallback sin
+  llamar al LLM (`error_type="fallback_sin_llm"`) o agotó cuota
+  (`error_type="rate_limit"`) — así la tasa de éxito del panel revela
+  degradaciones silenciosas en lugar de contar llamadas IA falsas de 0 tokens.
+- **Panel**: `GET /api/admin/usage` (resumen por operación/proveedor + serie
+  diaria + costo estimado) y `GET /api/admin/usage/recent` (filas crudas). Solo
+  admin; es vista técnica (tokens/costos) → NO en la UI de RRHH (§7); vive en el
+  panel del ingeniero (`/ops`, Sprint 5).
+- **Precios**: estimaciones por modelo en `LLM_PRICING_USD_PER_1M`
+  (`app/core/usage.py`). Edítalos cuando el proveedor cambie tarifas. Ollama
+  local = 0.
+- **`llm_usage` NO es write-only legal** como `audit_logs`: es analítica, se
+  puede podar/truncar por retención sin implicación de cumplimiento. (No
+  confundir con la prohibición de borrar `audit_logs` en §12.)
+
 ---
 
 ## 9. Concurrencia y performance

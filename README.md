@@ -1,421 +1,199 @@
-# RecruitAI
+# 🤖 RecruitAI
 
-Sistema de reclutamiento con inteligencia artificial diseñado para equipos de Recursos Humanos. Sube CVs en PDF o DOCX, extrae automáticamente la información con un LLM local, y obtén un ranking explicado de candidatos para cada vacante.
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
+[![Next.js 14](https://img.shields.io/badge/UI-Next.js%2014-black.svg)](https://nextjs.org/)
+[![PostgreSQL](https://img.shields.io/badge/DB-PostgreSQL%2015-336791.svg)](https://www.postgresql.org/)
+[![Qdrant](https://img.shields.io/badge/Vectores-Qdrant-DC244C.svg)](https://qdrant.tech/)
+[![Docker](https://img.shields.io/badge/Infra-Docker%20Compose-2496ED.svg)](https://www.docker.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Funciona **100% local** con Ollama (sin enviar datos a la nube) o con Gemini/OpenAI si prefieres mayor velocidad.
-
----
-
-## ¿Qué hace?
-
-1. **Creas una vacante** — describe el rol, sube el perfil de puesto en Word/PDF y el LLM extrae automáticamente todos los campos: título, skills, responsabilidades, experiencia mínima, idiomas requeridos, educación y descripción del rol
-2. **Ajustas los pesos de evaluación** — por defecto skills 40% / experiencia 35% / educación 25%, configurable por vacante
-3. **Subes CVs** — obligatorio asociarlos a una vacante; el LLM extrae nombre, email, teléfono, LinkedIn, skills, experiencia y formación académica / certificaciones
-4. **Ejecutas el matching IA** — ranking de candidatos 0-100 con explicación en lenguaje natural, skills faltantes y recomendación
-5. **Gestionas el pipeline** — vista tipo Kanban integrada en cada vacante con 4 etapas: Nuevos → Entrevista → Contratado / Descartado
-6. **Operaciones masivas** — selecciona varios candidatos y rechaza, avanza o exporta a CSV de una sola vez
-
-> Los CVs siempre se asocian a una vacante. Al eliminar una vacante, todos sus CVs se eliminan automáticamente (DB + vectores + archivos).
+> Análisis de CVs con IA para equipos de RRHH. Subes CVs en PDF/DOCX, la IA extrae los datos y produce un **ranking explicado** de candidatos para cada vacante. Funciona **100% local** con Ollama (los datos nunca salen) o en la **nube** (Groq / Gemini / OpenAI).
 
 ---
 
-## Instalación (5 minutos)
+## 📋 Contenido
 
-### Prerrequisitos
+- [🚀 Instalación](#-instalación)
+- [🔄 Local o nube](#-local-o-nube)
+- [🧰 Stack](#-stack)
+- [🧱 Arquitectura](#-arquitectura)
+- [📁 Estructura del proyecto](#-estructura-del-proyecto)
+- [🔐 Seguridad](#-seguridad)
+- [🩺 Problemas comunes](#-problemas-comunes)
+- [🏭 Producción](#-producción)
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- Git
+---
 
-No necesitas Python, Node.js ni ninguna dependencia adicional en tu máquina.
+## 🚀 Instalación
 
-### 1. Clonar y configurar
+**Prerrequisitos:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) y Git. Nada más (ni Python ni Node en tu máquina).
 
 ```bash
-git clone <url-del-repo>
-cd analisis-cv
+# 1. Clonar y configurar
+git clone https://github.com/JoseAAA/recruitai.git
+cd recruitai
 cp .env.example .env
 ```
 
-Abre `.env` y configura como mínimo:
-
 ```env
-JWT_SECRET=pon-aqui-cualquier-cadena-larga-y-aleatoria
+# 2. Editar .env (mínimo): secreto y contraseñas
+JWT_SECRET=una-cadena-larga-y-aleatoria
 ADMIN_INITIAL_PASSWORD=tu-password-seguro
 RECRUITER_INITIAL_PASSWORD=tu-password-seguro
 ```
 
-> En producción, contraseñas débiles bloquean el arranque del backend con un error explícito.
+```bash
+# 3. Arrancar (usa el script, NO 'docker compose up' directo)
+.\scripts\start.ps1        # Windows  ·  acciones: up | down | restart | logs | status
+./scripts/start.sh         # Linux / macOS
+```
 
-### 2. Arrancar
+Accede en **[http://localhost](http://localhost)** con `admin@recruitai.com` y tu contraseña.
 
-**Usa el script wrapper**, no `docker compose up` directo. El script detecta
-tu `LLM_PROVIDER` y levanta solo los servicios necesarios (Ollama queda apagado
-si usas API cloud, liberando ~3 GB de RAM y la GPU).
+> La base de datos se crea y migra **sola** al arrancar. El servicio de embeddings descarga su modelo (~1.2 GB) la primera vez (~1-2 min). La primera ejecución también baja las imágenes Docker (~2-3 GB).
+
+## 🔄 Local o nube
+
+Una sola variable, **`LLM_PROVIDER`** en `.env`, controla todo: el proveedor, el enmascarado de datos personales y si Ollama se enciende.
+
+| `LLM_PROVIDER` | Privacidad | Costo | Velocidad | Hardware |
+|----------------|-----------|-------|-----------|----------|
+| `ollama` *(default)* | 🟢 Total — datos no salen | 🟢 Gratis e ilimitado | 🟡 Según tu GPU | NVIDIA 6+ GB VRAM |
+| `groq` | 🟡 Nube | 🟢 Free ~25-30 CVs/día | 🟢 Muy rápido | Cualquiera |
+| `gemini` | 🟡 Nube | 🟡 Free ~20 análisis/día por modelo | 🟢 Rápido | Cualquiera |
+| `openai` | 🟡 Nube | 🟡 De pago | 🟢 Rápido | Cualquiera |
+
+**🖥️ Opción A — Local con Ollama (default):** no agregas nada al `.env`. Solo descarga el modelo la primera vez (con Ollama arriba):
 
 ```bash
-# Windows (PowerShell)
-.\scripts\start.ps1
-
-# Linux / macOS
-chmod +x scripts/start.sh
-./scripts/start.sh
+docker exec recruitai-ollama ollama pull gemma3:4b   # ~2.5 GB
 ```
 
-Acciones disponibles: `up` (default), `down`, `restart`, `logs`, `status`.
-
-La primera vez descarga las imágenes de Docker (~2-3 GB). Espera unos minutos.
-
-### 3. Instalar el modelo de IA
-
-**Embeddings**: el servicio `embeddings` (TEI) descarga automáticamente el
-modelo `Snowflake/snowflake-arctic-embed-m-v2.0` (~1.2 GB) la primera vez
-que arranca. No requiere intervención.
-
-**Generación (solo si usas Ollama local)**:
-
-```bash
-# Modelo para extraer datos de CVs y hacer matching (~2.5 GB)
-docker exec recruitai-ollama ollama pull gemma3:4b
-```
-
-Si usas LLM cloud (Groq/Gemini/OpenAI), te saltas este paso.
-
-### 4. Acceder
-
-| Servicio | URL |
-|----------|-----|
-| Dashboard | http://localhost |
-| API Docs (Swagger) | http://localhost:8000/docs |
-| MinIO (archivos) | http://localhost:9001 |
-
-**Usuarios por defecto** (contraseñas configuradas en `.env`):
-- Admin: `admin@recruitai.com` / `<ADMIN_INITIAL_PASSWORD>`
-- Reclutador: `rrhh@recruitai.com` / `<RECRUITER_INITIAL_PASSWORD>`
-
-> ⚠️ Entra siempre por **http://localhost** (la puerta principal). El puerto
-> :3000 es solo para desarrollo.
-
----
-
-## Flujo de trabajo (principio 80/20)
-
-El sistema resuelve el 80% del trabajo de análisis de CVs con el flujo mínimo:
-
-```
-1. Crear vacante  →  /jobs/new
-   ↳ Arrastra el Word/PDF del perfil del puesto → el LLM rellena todos los campos
-   ↳ Revisa y ajusta skills requeridos (son los más importantes para el scoring)
-   ↳ Opcional: personaliza los pesos skills/experiencia/educación
-
-2. Subir CVs  →  /data  (o desde la página de la vacante → "Importar CVs")
-   ↳ Selecciona la vacante antes de subir — es obligatorio
-   ↳ La IA extrae automáticamente toda la información del CV
-   ↳ Subida en paralelo de múltiples archivos
-
-3. Analizar  →  /jobs → [vacante] → pestaña "Ranking IA" → "Analizar con IA"
-   ↳ Ranking 0-100 con explicación por candidato
-   ↳ Skills presentes vs faltantes
-   ↳ Recomendación: Altamente recomendado / Buena opción / Considerar / No recomendado
-
-4. Gestionar pipeline  →  /jobs → [vacante] → pestaña "Pipeline"
-   ↳ Vista Kanban con 4 columnas: Nuevos · Entrevista · Contratado · Descartado
-   ↳ Score IA visible en cada tarjeta (si ya se ejecutó el matching)
-   ↳ Botones de acción rápida para mover al candidato entre etapas
-   ↳ Operaciones masivas: selecciona varios → rechazar / avanzar / exportar CSV
-```
-
----
-
-## Navegación
-
-| Sección | Ruta | Descripción |
-|---------|------|-------------|
-| Panel de Control | `/` | KPIs: total CVs, vacantes activas, candidatos nuevos esta semana |
-| Perfiles de Puesto | `/jobs` | Lista de vacantes con conteo de CVs y opción de matching rápido |
-| Detalle de Vacante | `/jobs/[id]` | 3 pestañas: Requisitos · Pipeline · Ranking IA |
-| Candidatos | `/candidates` | Listado global con filtros, selección múltiple y exportación CSV |
-| Importar CVs | `/data` | Carga masiva de CVs asociada a una vacante |
-| Analítica | `/analytics` | Estadísticas históricas del proceso de reclutamiento |
-
-### Pestaña "Pipeline" dentro de cada vacante
-
-El pipeline vive **dentro del perfil del puesto**, no como página separada. Esto refleja el flujo natural de RRHH: "abro esta vacante → veo en qué etapa está cada candidato para este puesto".
-
-| Columna | Estados internos que agrupa | Cuándo usar |
-|---------|---------------------------|-------------|
-| Nuevos | `new`, `screening`, `shortlisted` | CV recién subido, pendiente de revisar |
-| Entrevista | `interview` | Seleccionado para entrevistar |
-| Contratado | `hired`, `offer` | Decisión positiva tomada |
-| Descartado | `rejected` | No avanza en este proceso |
-
----
-
-## Creación de vacante: qué llena el LLM vs. qué configura RRHH
-
-| Campo | Quién lo llena | Impacto en scoring |
-|-------|---------------|-------------------|
-| Título del puesto | LLM + revisión | Embedding semántico |
-| Descripción del rol | LLM + revisión | **Matching semántico principal** |
-| Habilidades requeridas | LLM + revisión | **40% del puntaje (configurable)** |
-| Habilidades deseables | LLM + revisión | Bonus skills en match |
-| Experiencia mínima (años) | LLM + revisión | **Parte del score de experiencia** |
-| Formación académica | LLM + revisión | **25% del puntaje (configurable)** |
-| Responsabilidades | LLM + revisión | Embedding semántico |
-| Objetivos clave | LLM + revisión | Embedding semántico |
-| Idiomas requeridos | LLM + revisión | Match de idiomas del candidato |
-| Departamento | LLM o RRHH | Solo organizativo — no afecta scoring |
-| Modalidad / Industria | LLM | Solo informativo |
-| **Pesos de scoring** | **Solo RRHH** | Cada empresa pondera diferente según el rol |
-
----
-
-## Cambiar de motor de IA — una sola variable
-
-Editas `LLM_PROVIDER` en `.env`, ejecutas el script de arranque y todo se
-ajusta automáticamente: el provider del backend, el masking de PII, y si
-Ollama se levanta o no.
-
-| `LLM_PROVIDER=` | Privacidad | Coste | Velocidad | Hardware | PII masking |
-|---|---|---|---|---|---|
-| `ollama` (default) | 🟢 Total — datos nunca salen | 🟢 Gratis **e ilimitado** | 🟡 Media (limitado por tu GPU) | NVIDIA 6+ GB VRAM | OFF (no se necesita) |
-| `groq` | 🟡 Cloud, no entrenan con tus datos | 🟢 Free tier ~25-30 CVs/día | 🟢 5-10× más rápido | Cualquiera | **ON automático** |
-| `gemini` | 🟡 Cloud Google | 🟡 Free tier **~20 análisis/día por modelo** | 🟢 Rápido | Cualquiera | **ON automático** |
-| `openai` | 🟡 Cloud OpenAI | 🟡 Más caro | 🟢 Rápido | Cualquiera | **ON automático** |
-
-> 💡 **Para probar el sistema con volumen real de CVs, usa `ollama` (gratis e
-> ilimitado).** Las cuotas gratuitas de la nube alcanzan para demos puntuales,
-> no para un día de trabajo de RRHH — Google además las recorta sin aviso.
-
-### Cómo cambiar (3 pasos)
-
-1. Edita `.env`:
-   ```env
-   LLM_PROVIDER=groq          # o gemini, openai, ollama
-   GROQ_API_KEY=gsk_...       # solo si elegiste un proveedor cloud
-   ```
-
-2. Ejecuta el script:
-   ```bash
-   .\scripts\start.ps1 restart    # Windows
-   ./scripts/start.sh restart     # Linux/macOS
-   ```
-
-3. El script detecta el provider y:
-   - Si es **cloud**: apaga Ollama (libera ~3 GB RAM + toda la VRAM), activa PII masking, valida que la API key esté presente.
-   - Si es **ollama**: levanta el contenedor Ollama con GPU, desactiva PII masking (no se necesita en local), activa el profile `local-llm`.
-
-Si te falta la API key cuando intentas usar cloud, el script y el backend
-**fallan rápido con un mensaje claro** — no hay fallback silencioso a Ollama.
-
-### Dónde obtener cada API key
-
-- **Groq**: https://console.groq.com — rapidísimo, modelos open, free tier moderado
-- **Gemini**: https://aistudio.google.com/apikey — free tier pequeño (~20 análisis/día por modelo); verifica TU cuota real en AI Studio
-- **OpenAI**: https://platform.openai.com/api-keys — sin free tier, máxima calidad
-
-### Modelos por defecto (opcionales en `.env`)
-
-| Variable | Default | Para qué |
-|---|---|---|
-| `OLLAMA_MODEL` | `gemma3:4b` | Modelo único para extracción + matching local |
-| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Modelo Groq |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Modelo Gemini — ojo: Google retira modelos rápido (2.0-flash murió 01-jun-2026); alternativas: `gemini-3.5-flash` (mejor), `gemini-3.1-flash-lite` (más cuota gratis) |
-| `GEMINI_MIN_REQUEST_INTERVAL` | `6.0` | Segundos entre llamadas a Gemini (respeta la cuota gratuita). Pon `0` si pagas |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Modelo OpenAI |
-
----
-
-## Seguridad
-
-Todos los endpoints requieren autenticación JWT. El sistema incluye capas de defensa contra los riesgos del OWASP LLM Top 10:
-
-| Capa | Mecanismo | Qué protege |
-|------|-----------|-------------|
-| **Autenticación** | JWT en todos los endpoints | Acceso no autorizado |
-| **Rate limiting** | 10 req/min en upload y login (`slowapi`) | Fuerza bruta y abuso |
-| **Tamaño de body** | Máximo 50 MB | DoS por archivos grandes |
-| **Magic bytes** | Validación de PDF/DOCX real | Archivos maliciosos disfrazados |
-| **Deduplicación** | Hash SHA-256 por CV + job | Subidas duplicadas |
-| **Prompt injection** | 37+ patrones regex bloqueantes (5 capas) | CVs con instrucciones maliciosas |
-| **Output scanning** | Patrones de compromiso en respuesta LLM | Jailbreak exitoso |
-| **PII Masking** | Anonimización antes de LLMs cloud | Fuga de datos personales |
-| **Audit log** | Tabla `audit_logs` en PostgreSQL | Trazabilidad LPDP Perú |
-| **CORS** | Métodos y headers restringidos | Cross-origin attacks |
-| **Credenciales seguras** | Bloqueo de arranque en producción si detecta defaults | Despliegues inseguros |
-
-> **Nota de seguridad de dependencias:** `axios` está fijado en `1.13.6` sin caret (`^`). Las versiones `1.14.1` y `0.30.4` fueron comprometidas en marzo 2026 (ataque a la cadena de suministro, RAT norcoreano). No actualizar hasta verificar que la versión objetivo es segura.
-
-Ver detalle técnico en [docs/SECURITY_PROMPT_INJECTION.md](docs/SECURITY_PROMPT_INJECTION.md).
-
----
-
-## Requisitos de hardware
-
-### Con Ollama local (recomendado)
-
-| Componente | Mínimo | Recomendado |
-|------------|--------|-------------|
-| GPU NVIDIA | 4 GB VRAM | 6+ GB VRAM |
-| RAM | 8 GB | 16 GB |
-| Disco | 15 GB libres | 25 GB libres |
-
-> Sin GPU NVIDIA, Ollama funciona en CPU pero es lento (~2-3 min por CV). Considera usar Gemini en ese caso.
-
-### Con Gemini (nube)
-
-Cualquier máquina con Docker funciona. No necesitas GPU.
-
----
-
-## Comandos útiles
-
-```bash
-# Ver estado de todos los contenedores
-docker compose ps
-
-# Logs en tiempo real
-docker logs recruitai-backend -f
-docker logs recruitai-frontend -f
-
-# Recargar código tras editar (Windows — hot reload no funciona)
-docker restart recruitai-backend
-docker restart recruitai-frontend
-
-# Modelos Ollama instalados
-docker exec recruitai-ollama ollama list
-
-# Detener todo (sin borrar datos)
-docker compose down
-
-# Reset completo (borra todos los datos)
-docker compose down -v
-```
-
----
-
-## Arquitectura
-
-```
-Navegador → http://localhost
-               │
-           ┌───┴───┐
-           │ Nginx │  Reverse proxy
-           └───┬───┘
-        ┌──────┴───────┐
-        ▼              ▼
-   Next.js :3000    FastAPI :8000
-   (UI / frontend)  (API + MCP Server)
-                        │
-   ┌──────────┬─────────┼─────────┬──────────┬───────────────┐
-   ▼          ▼         ▼         ▼          ▼               ▼
-PostgreSQL  Qdrant    MinIO    Embeddings   Ollama       Cloud LLM
-(datos)    (vectores) (archivos) (TEI       (LLM local,  (Groq/Gemini/
-                                arctic-     opcional —    OpenAI —
-                                embed-m,    profile       opcional)
-                                768d)       local-llm)
-           SIEMPRE   SIEMPRE   SIEMPRE     según .env    según .env
-```
-
-**Separación embeddings ↔ LLM** (patrón "separation of inference services"):
-el servicio de embeddings corre independiente del LLM. Esto permite cambiar
-el LLM entre Ollama local y APIs cloud sin afectar la búsqueda semántica.
-
-**Stack:**
-- Backend: Python 3.11, FastAPI, SQLAlchemy async, Pydantic v2, `slowapi` rate limiting
-- Frontend: Next.js 14 (App Router), TypeScript, Tailwind CSS, axios 1.13.6
-- Base de datos: PostgreSQL 15 (incluye tabla `audit_logs` para trazabilidad LPDP)
-- Búsqueda semántica: Qdrant (4 vectores por candidato: `experience`, `education`, `skills`, `summary`)
-- Almacenamiento de archivos: MinIO (S3-compatible)
-- LLM local: Ollama con gemma3:4b
-- MCP Server: expone la API en `http://localhost:8000/mcp` para Claude Desktop / Cursor
-
-### Modelos de base de datos clave
-
-| Tabla | Descripción |
-|-------|-------------|
-| `candidates` | CV extraído — incluye `job_id FK` (obligatorio) |
-| `job_profiles` | Vacante — incluye `scoring_config JSON` (pesos personalizados) |
-| `match_results` | Scores IA persistidos (no se recalculan en cada visita) |
-| `candidate_notes` | Notas de RRHH: general, entrevista, feedback, cambio de estado |
-| `audit_logs` | Log de acciones para cumplimiento LPDP Perú |
-
----
-
-## Deploy en producción
-
-### 1. Generar claves seguras
-
-```bash
-# JWT Secret
-openssl rand -hex 32
-
-# Encryption Key (para PII masking con Gemini/OpenAI)
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-### 2. Configurar `.env` para producción
+**☁️ Opción B — Nube con API key:** pon el proveedor y su key en `.env`, luego reinicia:
 
 ```env
-ENVIRONMENT=production
-JWT_SECRET=<generado-con-openssl>
-ENCRYPTION_KEY=<generado-con-fernet>
-POSTGRES_PASSWORD=<password-fuerte>
-ADMIN_INITIAL_PASSWORD=<password-fuerte>
-RECRUITER_INITIAL_PASSWORD=<password-fuerte>
-
-# Si usas Gemini en producción:
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=<tu-api-key>
-PII_MASKING_ENABLED=true
+LLM_PROVIDER=groq          # o gemini, openai
+GROQ_API_KEY=gsk_...
 ```
-
-> En `ENVIRONMENT=production`, el backend rechaza arrancar si detecta valores por defecto en `JWT_SECRET`, `ADMIN_INITIAL_PASSWORD` o `RECRUITER_INITIAL_PASSWORD`.
-
----
-
-## Solución de problemas
-
-**"No se pudo conectar con el servidor" al iniciar sesión**
-Estás entrando por una URL incorrecta o los servicios no están arriba.
-Entra por **http://localhost** y verifica con `.\scripts\start.ps1 status`.
-
-**"El sistema de análisis está saturado" al subir CVs o analizar**
-La cuota gratuita del proveedor de IA en la nube se agotó (Gemini free:
-~20 análisis/día por modelo). Espera unos minutos, cambia de modelo en
-`GEMINI_MODEL`, o usa `LLM_PROVIDER=ollama` (sin límites).
-
-**El frontend no muestra los cambios tras editar código (Windows)**
 ```bash
-docker restart recruitai-frontend
+.\scripts\start.ps1 restart
 ```
-El hot reload de Next.js no detecta cambios del host en Windows por limitaciones de inotify.
 
-**Ollama responde lento en el primer CV**
-Normal. El modelo tarda 20-30 segundos en cargarse a VRAM (cold start). A partir del segundo CV va mucho más rápido.
+> **API keys:** [Groq](https://console.groq.com) · [Gemini](https://aistudio.google.com/apikey) · [OpenAI](https://platform.openai.com/api-keys). Si eliges nube y falta la key, el sistema **falla con un mensaje claro** (no se cae en silencio a otro modo). Modelos por defecto y opciones avanzadas: ver `.env.example`.
+>
+> 💡 **Para procesar muchos CVs usa Ollama** (gratis e ilimitado). Las cuotas gratuitas de la nube son para demos puntuales.
 
-**Error al subir un CV: "Debes asociar el CV a una vacante"**
-Es obligatorio seleccionar una vacante al subir un CV. Crea primero la vacante desde `/jobs/new` o `/jobs`.
+## 🧰 Stack
 
-**Error al hacer matching: "Sin candidatos para analizar"**
-Los CVs deben haber sido subidos con esa vacante seleccionada. Verifica desde la pestaña "Pipeline" de la vacante.
+| Capa | Tecnología |
+|------|------------|
+| **Backend** | Python 3.11 · FastAPI · SQLAlchemy async · Pydantic v2 |
+| **Frontend** | Next.js 14 (App Router) · TypeScript · Tailwind CSS |
+| **Base de datos** | PostgreSQL 15 (incluye `audit_logs` para trazabilidad LPDP) |
+| **Búsqueda semántica** | Qdrant (4 vectores por candidato) |
+| **Embeddings** | TEI · `Snowflake/arctic-embed-m` (768d, multilingüe ES/EN) |
+| **LLM** | Ollama (local) · o Groq / Gemini / OpenAI (nube) |
+| **Archivos** | MinIO (S3-compatible) |
+| **Infraestructura** | Docker Compose · Nginx |
 
-**El campo "Descripción del puesto" quedó vacío tras analizar el documento**
-Si el LLM no genera descripción, el sistema usa automáticamente el primer párrafo sustancial del documento. Si sigue vacío, el documento podría no tener párrafos de descripción — escríbela manualmente.
+## 🧱 Arquitectura
 
-**Error 413 al subir CV**
-El archivo supera el límite de 50 MB. Los CVs normales no deberían llegar a ese tamaño.
+```
+Navegador ──▶  http://localhost  (Nginx, única puerta de entrada)
+                       │
+            ┌──────────┴──────────┐
+            ▼                     ▼
+      Next.js (UI)        FastAPI (API + MCP server)
+                                  │
+   ┌──────────┬──────────┬────────┴───────┬───────────┬──────────────┐
+   ▼          ▼          ▼                ▼           ▼              ▼
+PostgreSQL  Qdrant     MinIO         Embeddings     Ollama        Nube LLM
+ (datos)  (vectores) (archivos)        (TEI)     (local, opc.)  (Groq/Gemini/
+                                                                   OpenAI)
+          └──────── siempre activos ────────┘   └──── según LLM_PROVIDER ────┘
+```
 
-**Error 400 al subir CV: "contenido potencialmente malicioso"**
-El texto del documento activó el detector de prompt injection. El archivo podría contener instrucciones dirigidas al sistema de IA.
+> **Embeddings y LLM están separados:** puedes cambiar el LLM entre local y nube sin afectar la búsqueda semántica. Todos los servicios internos escuchan solo en `127.0.0.1`; la única entrada de red es Nginx.
 
-**Extracción incorrecta de email o teléfono**
-El LLM solo extrae valores que aparecen literalmente en el texto del CV. Si el email/teléfono está en una imagen o formato no estándar, puede no detectarse.
+## 📁 Estructura del proyecto
 
-**Las versiones de los paquetes npm no se actualizan solas**
-Intencional. `axios` está fijado en `1.13.6` sin `^` para evitar actualizaciones automáticas a versiones comprometidas. Actualizar manualmente solo tras verificar el changelog de seguridad.
+```
+recruitai/
+├── backend/                FastAPI + Python 3.11
+│   ├── app/
+│   │   ├── adapters/       Integraciones: LLM, PDF, Qdrant, MinIO
+│   │   ├── api/routes/     Endpoints: auth, candidates, jobs, search, admin
+│   │   ├── core/           Config, seguridad, privacidad (auditoría LPDP), uso LLM
+│   │   ├── db/             Modelos SQLAlchemy
+│   │   └── main.py
+│   ├── alembic/            Migraciones de BD (corren solas al arrancar)
+│   └── evals/              Tests de regresión + evaluaciones de IA
+├── frontend/               Next.js 14 + TypeScript  (src/{app,components,lib})
+├── infra/init-db.sql       Esquema inicial de PostgreSQL
+├── scripts/start.ps1|.sh   Arranque inteligente (detecta LLM_PROVIDER)
+├── docker-compose.yml      8 servicios
+├── nginx.conf              Reverse proxy (única entrada)
+├── AGENTS.md               Reglas operativas del repo (fuente de verdad)
+└── README.md
+```
+
+## 🔐 Seguridad
+
+Todos los endpoints requieren autenticación JWT. Defensas alineadas con OWASP LLM Top 10:
+
+- **Anti prompt-injection** (5 capas): patrones EN/ES, límites de longitud, escaneo de salida y de texto oculto en PDFs.
+- **Validación de archivos**: MIME real, rechazo de PDF con JavaScript y DOCX con macros, límite 50 MB, deduplicación SHA-256.
+- **PII masking** automático antes de enviar a un LLM en la nube (cumplimiento LPDP Perú).
+- **Auditoría** (`audit_logs`) de cada acción sensible · **rate limiting** en login/upload · arranque bloqueado en producción si hay contraseñas por defecto.
+
+> 🔒 **Dependencias:** `axios` está fijado en `1.13.6` (las versiones `1.14.1` y `0.30.4` fueron comprometidas en marzo 2026). No actualizar sin revisar el changelog de seguridad.
+>
+> Detalle técnico: [docs/SECURITY_PROMPT_INJECTION.md](docs/SECURITY_PROMPT_INJECTION.md).
+
+## 🩺 Problemas comunes
+
+| Síntoma | Causa / solución |
+|---------|------------------|
+| "No se pudo conectar con el servidor" | Entra por **http://localhost** (no `:3000`). Revisa `.\scripts\start.ps1 status`. |
+| "El sistema de análisis está saturado" | Cuota gratis de la nube agotada. Cambia de modelo o usa `LLM_PROVIDER=ollama`. |
+| El frontend no refleja cambios (Windows) | `docker restart recruitai-frontend` (el hot-reload no funciona en Windows). |
+| Ollama lento en el primer CV | Normal: el modelo tarda 20-30 s en cargar a la GPU (cold start). El resto va rápido. |
+| "Debes asociar el CV a una vacante" | Crea o selecciona la vacante antes de subir el CV. |
+| Error 413 al subir | El archivo supera 50 MB. |
+
+```bash
+# Comandos útiles
+docker logs recruitai-backend -f          # ver logs
+docker exec recruitai-ollama ollama list  # modelos instalados (modo Ollama)
+docker compose down                        # detener (sin borrar datos)
+docker compose down -v                     # reset total (BORRA todos los datos)
+```
+
+## 🏭 Producción
+
+```bash
+openssl rand -hex 32                                                                       # JWT_SECRET
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # ENCRYPTION_KEY
+```
+
+```env
+ENVIRONMENT=production            # el backend NO arranca con contraseñas por defecto
+JWT_SECRET=<generado>
+ENCRYPTION_KEY=<generado>         # requerido si usas LLM en la nube (PII masking)
+POSTGRES_PASSWORD=<fuerte>
+ADMIN_INITIAL_PASSWORD=<fuerte>
+RECRUITER_INITIAL_PASSWORD=<fuerte>
+```
+
+> Requisitos de hardware con Ollama local: GPU NVIDIA 6+ GB VRAM, 16 GB RAM, 25 GB de disco. Sin GPU, Ollama corre en CPU (~2-3 min por CV) — en ese caso conviene usar un proveedor en la nube.
 
 ---
 
-## Licencia
+## 👤 Autor
 
-MIT
+**Jose Alarcon** — Cientifico de Datos
+
+---
+
+<p align="center"><sub>🤖 La IA sugiere; el reclutador decide.</sub></p>
