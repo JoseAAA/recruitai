@@ -39,7 +39,13 @@ Get-Content ".env" | ForEach-Object {
     }
 }
 
-$provider = ($envVars["LLM_PROVIDER"] ?? "ollama").ToLower()
+# Compatibilidad PowerShell 5.1 (el que trae Windows de fábrica): el operador
+# `??` (null-coalescing) solo existe en PowerShell 7+. Si el cliente ejecuta el
+# script con la consola por defecto de Windows, `??` rompe con un error de
+# parseo confuso y el sistema no arranca. Usamos if/else, que funciona en 5.1 y 7+.
+$rawProvider = $envVars["LLM_PROVIDER"]
+if ([string]::IsNullOrWhiteSpace($rawProvider)) { $rawProvider = "ollama" }
+$provider = $rawProvider.ToLower()
 
 # ── Acciones simples sin lógica de provider ──────────────────────────────────
 if ($Action -eq "down") {

@@ -1,0 +1,5 @@
+# Forzar fin de línea LF en scripts de shell. Si se editan/clonan en Windows,
+# git no debe convertirlos a CRLF: un \r en el shebang (#!/bin/sh) rompe la
+# ejecución dentro de los contenedores Linux ("no such file or directory").
+*.sh text eol=lf
+entrypoint.sh text eol=lf

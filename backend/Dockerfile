@@ -28,6 +28,15 @@ COPY . .
 # Create uploads directory
 RUN mkdir -p /app/uploads
 
+# Entrypoint: corre las migraciones Alembic antes de arrancar la API.
+# Se copia FUERA de /app a /usr/local/bin porque docker-compose monta el código
+# host con un volumen (./backend:/app) que taparia el archivo en runtime; en
+# /usr/local/bin sobrevive al montaje. El `sed` normaliza CRLF->LF por si el
+# archivo se editó en Windows (un \r en el shebang rompe el script en Linux).
+RUN cp /app/entrypoint.sh /usr/local/bin/recruitai-entrypoint.sh \
+    && sed -i 's/\r$//' /usr/local/bin/recruitai-entrypoint.sh \
+    && chmod +x /usr/local/bin/recruitai-entrypoint.sh
+
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/usr/local/bin/recruitai-entrypoint.sh"]
