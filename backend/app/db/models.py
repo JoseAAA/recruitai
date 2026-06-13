@@ -26,6 +26,7 @@ class CandidateDB(Base):
     email: Mapped[Optional[str]] = mapped_column(String(255))
     phone: Mapped[Optional[str]] = mapped_column(String(50))
     linkedin: Mapped[Optional[str]] = mapped_column(String(500))
+    github: Mapped[Optional[str]] = mapped_column(String(500))
     summary: Mapped[Optional[str]] = mapped_column(Text)
     skills: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
     raw_text: Mapped[Optional[str]] = mapped_column(Text)
@@ -68,21 +69,34 @@ class ExperienceEntryDB(Base):
 
 
 class EducationEntryDB(Base):
-    """Education entry model."""
+    """Education entry model.
+
+    ``degree_status``: progreso del grado (Titulado, Bachiller, Egresado,
+    En curso, Cursando, Culminado, Colegiado, Inconcluso). Crítico en Perú
+    para roles regulados — un Ingeniero "Bachiller" no firma planos; uno
+    "Colegiado" sí. Permite filtros del tipo "MBA Titulado" vs "MBA en curso".
+    """
+
     __tablename__ = "education_entries"
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
-    candidate_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("candidates.id", ondelete="CASCADE"))
+    candidate_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("candidates.id", ondelete="CASCADE")
+    )
     institution: Mapped[Optional[str]] = mapped_column(String(255))
     degree: Mapped[Optional[str]] = mapped_column(String(255))
     field_of_study: Mapped[Optional[str]] = mapped_column(String(255))
-    education_type: Mapped[Optional[str]] = mapped_column(String(50), default="educacion")  # "educacion" or "certificacion"
+    # "educacion" o "certificacion"
+    education_type: Mapped[Optional[str]] = mapped_column(String(50), default="educacion")
+    degree_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     start_date: Mapped[Optional[datetime]] = mapped_column(Date)
     end_date: Mapped[Optional[datetime]] = mapped_column(Date)
     gpa: Mapped[Optional[str]] = mapped_column(String(10))
 
     # Relationship
-    candidate: Mapped["CandidateDB"] = relationship("CandidateDB", back_populates="education")
+    candidate: Mapped["CandidateDB"] = relationship(
+        "CandidateDB", back_populates="education"
+    )
 
 
 class JobProfileDB(Base):

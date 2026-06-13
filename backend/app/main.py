@@ -72,20 +72,24 @@ async def _warmup_ollama():
         await provider.ensure_model()
         await provider.close()
 
-    # --- Step 2: warmup ping — loads model into GPU VRAM ---
+    # --- Step 2: warmup ping — loads each unique model into GPU VRAM ---
+    # We dedup so EXTRACTION_MODEL == MATCH_MODEL doesn't pay the load twice.
+    # If they differ, both are warmed so the first /search/match doesn't pay
+    # a 10-30s cold-start on top of LLM scoring time.
     import httpx
     async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
-            r = await client.post(
-                f"{ollama_host}/api/generate",
-                json={"model": extraction_model, "prompt": "Hola", "stream": False},
-            )
-            if r.status_code == 200:
-                logger.info(f"✅ Warmup: {extraction_model} loaded into GPU VRAM")
-            else:
-                logger.warning(f"Warmup {extraction_model}: HTTP {r.status_code} — {r.text[:100]}")
-        except Exception as e:
-            logger.warning(f"Warmup {extraction_model} failed (will load on first request): {e}")
+        for model_name in dict.fromkeys([extraction_model, match_model]):
+            try:
+                r = await client.post(
+                    f"{ollama_host}/api/generate",
+                    json={"model": model_name, "prompt": "Hola", "stream": False},
+                )
+                if r.status_code == 200:
+                    logger.info(f"✅ Warmup: {model_name} loaded into GPU VRAM")
+                else:
+                    logger.warning(f"Warmup {model_name}: HTTP {r.status_code} — {r.text[:100]}")
+            except Exception as e:
+                logger.warning(f"Warmup {model_name} failed (will load on first request): {e}")
 
         try:
             r = await client.post(
@@ -115,13 +119,18 @@ async def lifespan(app: FastAPI):
     logger.info("👋 Shutting down RecruitAI-Core...")
 
 
+_is_dev = settings.ENVIRONMENT == "development"
 app = FastAPI(
     title="RecruitAI-Core",
     description="AI-powered talent acquisition system with semantic search and explainable scoring",
     version="0.1.0",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    # Hide /docs, /redoc, /openapi.json in non-dev environments. They expose
+    # every endpoint, schema, and example body — invaluable enumeration aid
+    # for an attacker scanning the surface.
+    docs_url="/docs" if _is_dev else None,
+    redoc_url="/redoc" if _is_dev else None,
+    openapi_url="/openapi.json" if _is_dev else None,
 )
 
 # Rate Limiting
@@ -159,6 +168,29 @@ app.add_middleware(
 )
 
 
+# Security response headers — protect against XSS, clickjacking, MIME sniffing,
+# and accidental data leak via referer. Applied uniformly to every API response.
+# In production (HTTPS) we additionally emit HSTS to lock the browser into TLS.
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    # Block clickjacking — disallow our pages being framed by other sites.
+    response.headers["X-Frame-Options"] = "DENY"
+    # Block MIME-sniffing — prevent the browser from re-interpreting JSON as HTML/JS.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # Strip referer when navigating away — never leak internal URLs/IDs.
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # Disable browser feature APIs we don't use.
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    # API responses should never be cached by intermediate proxies.
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    # In production force the browser to use HTTPS for the next 6 months.
+    if settings.ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=15552000; includeSubDomains"
+    return response
+
+
 # ============ Health Check Endpoints ============
 
 @app.get("/", tags=["Health"])
@@ -179,42 +211,79 @@ async def health_check():
 
 @app.get("/api/health", tags=["Health"])
 async def api_health():
-    """API health check with service status."""
+    """API health check con info del proveedor activo y de los servicios.
+
+    El frontend (hook ``useAI`` en ``lib/ai.ts``) consume este endpoint para
+    pintar el indicador del header. **Por eso devuelve ``llm_provider`` con
+    el valor REAL del runtime** (de ``.env``), no un placeholder estático.
+    Antes esto faltaba y la UI caía al fallback ``"ollama"`` aunque el
+    sistema estuviera usando Groq/Gemini/OpenAI.
+    """
     from app.adapters import LLMEngine, QdrantRepository
-    
+    from app.adapters.embedding_service import EmbeddingService
+
+    provider_name = (settings.LLM_PROVIDER or "ollama").lower()
+
     services = {
         "api": "healthy",
         "qdrant": "unknown",
-        "ollama": "unknown",
+        "embeddings": "unknown",
+        provider_name: "unknown",
     }
-    
-    # Check Qdrant
+
+    # Qdrant
     try:
         qdrant = QdrantRepository()
-        info = await qdrant.get_collection_info()
+        await qdrant.get_collection_info()
         services["qdrant"] = "healthy"
     except Exception as e:
         services["qdrant"] = f"unhealthy: {str(e)[:50]}"
-    
-    # Check Ollama
+
+    # Embeddings (TEI siempre activo, independiente del LLM)
+    try:
+        emb = EmbeddingService()
+        # Embed un texto corto como smoke test
+        v = await emb.embed_text("ping")
+        services["embeddings"] = "healthy" if v and len(v) > 0 else "degraded"
+    except Exception as e:
+        services["embeddings"] = f"unhealthy: {str(e)[:50]}"
+
+    # Proveedor LLM activo (Ollama / Groq / Gemini / OpenAI)
     try:
         llm = LLMEngine()
         if await llm.health_check():
-            services["ollama"] = "healthy"
+            services[provider_name] = "healthy"
         else:
-            services["ollama"] = "unhealthy: not responding"
+            services[provider_name] = "unhealthy: not responding"
     except Exception as e:
-        services["ollama"] = f"unhealthy: {str(e)[:50]}"
-    
+        services[provider_name] = f"unhealthy: {str(e)[:50]}"
+
     overall = "healthy" if all(
         v == "healthy" for v in services.values()
     ) else "degraded"
-    
+
+    # Modelo activo según provider. ``settings.EXTRACTION_MODEL`` y
+    # ``MATCH_MODEL`` se auto-sincronizan con ``OLLAMA_MODEL`` aunque se use
+    # cloud (legacy del diseño anterior), por lo que NO los reportamos
+    # directamente: si el provider es cloud, mostramos el modelo cloud real.
+    model_by_provider = {
+        "ollama": settings.OLLAMA_MODEL,
+        "groq":   getattr(settings, "GROQ_MODEL", ""),
+        "gemini": getattr(settings, "GEMINI_MODEL", ""),
+        "openai": getattr(settings, "OPENAI_MODEL", ""),
+    }
+    active_model = model_by_provider.get(provider_name, "") or settings.OLLAMA_MODEL
+
     return JSONResponse(
         status_code=200 if overall == "healthy" else 503,
         content={
             "status": overall,
             "services": services,
+            # Campos que consume el frontend (hook useAI en lib/ai.ts)
+            "llm_provider": provider_name,
+            "extraction_model": active_model,
+            "match_model": active_model,
+            "embedding_model": settings.EMBEDDING_MODEL,
         }
     )
 

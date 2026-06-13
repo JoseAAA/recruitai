@@ -1,0 +1,20 @@
+# Dependencias específicas para evals — separadas del runtime.
+# Se instalan con: pip install -r requirements-evals.txt
+#
+# NO se incluyen en la imagen Docker de producción para mantenerla ligera.
+# Se instalan ad-hoc cuando se corren los evals:
+#   docker exec recruitai-backend pip install -r requirements-evals.txt
+#   docker exec recruitai-backend inspect eval evals/tasks/cv_extraction.py ...
+
+# Framework de evals (UK AI Security Institute, MIT)
+# Adoptado por Anthropic, DeepMind, METR, Apollo Research, AISIs (US/UK/EU).
+# Hamel Husain le dedica una guest lecture en su curso oficial de evals.
+inspect-ai>=0.3.50
+
+# Fuzzy string matching para campos tipo nombre/empresa donde queremos
+# tolerar variaciones menores ("Universidad de Lima" vs "U. de Lima").
+rapidfuzz>=3.10.0
+
+# Tests de regresión deterministas (sin LLM) del pipeline de extracción.
+# Correr: docker exec recruitai-backend pytest evals/test_extraction_robustness.py -v
+pytest>=8.0.0

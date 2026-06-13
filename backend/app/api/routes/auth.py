@@ -24,6 +24,7 @@ from app.core.security import (
 )
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.privacy import AuditLogger, get_audit_logger
 from app.db.models import UserDB
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,29 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
+# Strict bodies for self-service updates. Listed explicitly so a recruiter
+# cannot escalate to admin or change is_active / role via mass-assignment.
+class UpdateMeRequest(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=120)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8)
+
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=8)
+
+
+class AdminUpdateRoleRequest(BaseModel):
+    role: str = Field(..., pattern="^(admin|recruiter)$")
+
+
+class AdminUpdateStatusRequest(BaseModel):
+    is_active: bool
+
+
 # ============ Database Helper Functions ============
 
 async def get_user_by_email(db: AsyncSession, email: str) -> Optional[UserDB]:
@@ -88,14 +112,9 @@ async def ensure_default_users(db: AsyncSession):
     admin_password = settings.ADMIN_INITIAL_PASSWORD
     recruiter_password = settings.RECRUITER_INITIAL_PASSWORD
 
-    if admin_password == "change-me-on-first-run":
-        logger.warning(
-            "⚠️  ADMIN_INITIAL_PASSWORD uses default value — set a strong password in your .env file before exposing to the internet!"
-        )
-    if recruiter_password == "change-me-on-first-run":
-        logger.warning(
-            "⚠️  RECRUITER_INITIAL_PASSWORD uses default value — set a strong password in your .env file before exposing to the internet!"
-        )
+    # Insecure-default check is centralized in core.config.Settings, which
+    # hard-fails in production. We don't repeat the warning here to keep
+    # startup logs clean — the seed only runs the first time anyway.
 
     # Check if admin exists
     admin = await get_user_by_email(db, "admin@recruitai.com")
@@ -142,8 +161,15 @@ async def get_current_user(
     token_data = decode_token(token)
     if token_data is None:
         raise credentials_exception
-    
-    user = await get_user_by_email(db, token_data.email)
+
+    # Look up by UUID (sub claim), not by email. Emails can be re-assigned
+    # to a new user (delete + re-create) and an old token would silently
+    # resurrect the previous user's privileges.
+    try:
+        user_uuid = UUID(token_data.user_id)
+    except (ValueError, TypeError):
+        raise credentials_exception
+    user = await get_user_by_id(db, user_uuid)
     if user is None:
         raise credentials_exception
     
@@ -168,22 +194,43 @@ async def get_current_active_user(
     return current_user
 
 
+def get_current_admin_user(
+    current_user: UserResponse = Depends(get_current_active_user),
+) -> UserResponse:
+    """Dependency: require admin role. 403 otherwise."""
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requieren privilegios de administrador"
+        )
+    return current_user
+
+
 # ============ Endpoints ============
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 @limit("5/minute")
-async def register(request: Request, user_data: UserCreate, db: AsyncSession = Depends(get_db)):
+async def register(
+    request: Request,
+    user_data: UserCreate,
+    current_user: UserResponse = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Register a new recruiter — ADMIN ONLY.
+
+    Closed by design: there is no public sign-up. The system is operated by
+    a small set of HR analysts whose accounts are provisioned by the owner.
+    Self-registration would let anyone on the internet read every CV in the
+    database. The route is kept here (instead of removed) only to keep older
+    admin-created scripts working — it requires the same admin token as
+    /api/auth/users.
     """
-    Register a new user.
-    """
-    # Check if user exists
     if await get_user_by_email(db, user_data.email):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El email ya está registrado"
         )
-    
-    # Create new user
+
     user = UserDB(
         id=uuid4(),
         email=user_data.email,
@@ -192,13 +239,13 @@ async def register(request: Request, user_data: UserCreate, db: AsyncSession = D
         is_active=True,
         hashed_password=get_password_hash(user_data.password),
     )
-    
+
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    
-    logger.info(f"New user registered: {user.email}")
-    
+
+    logger.info(f"Admin {current_user.email} registered new user: {user.email}")
+
     return UserResponse(
         id=user.id,
         email=user.email,
@@ -213,66 +260,131 @@ async def register(request: Request, user_data: UserCreate, db: AsyncSession = D
 async def login(
     request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
 ):
     """
     Login and get access token.
     Uses OAuth2 password flow (username = email).
+
+    LPDP: registra cada intento de login (exitoso y fallido) para detectar
+    accesos no autorizados y reconstruir quién accedió al sistema cuándo.
     """
     # Ensure default users exist on first login attempt
     await ensure_default_users(db)
-    
+
     user = await authenticate_user(db, form_data.username, form_data.password)
-    
+    client_ip = request.client.host if request.client else None
+
     if not user:
+        # Login fallido — audit con email intentado pero sin user_id real.
+        await audit.log_access(
+            user_id="anonymous",
+            action="login_failed",
+            resource_type="user",
+            resource_id=form_data.username[:80],  # email intentado (acotado)
+            ip_address=client_ip,
+            details={"reason": "invalid_credentials"},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email o contraseña incorrectos",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     if not user.is_active:
+        await audit.log_access(
+            user_id=str(user.id),
+            action="login_blocked",
+            resource_type="user",
+            resource_id=str(user.id),
+            ip_address=client_ip,
+            details={"reason": "user_inactive"},
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Usuario inactivo"
         )
-    
+
     access_token = create_access_token(
         data={"sub": str(user.id), "email": user.email}
     )
-    
+
     logger.info(f"User logged in: {user.email}")
-    
+    await audit.log_access(
+        user_id=str(user.id),
+        action="login_success",
+        resource_type="user",
+        resource_id=str(user.id),
+        ip_address=client_ip,
+        details={"role": user.role},
+    )
+
     return Token(access_token=access_token, token_type="bearer")
 
 
 @router.post("/login/json", response_model=Token)
 @limit("10/minute")
-async def login_json(request: Request, credentials: LoginCredentials, db: AsyncSession = Depends(get_db)):
+async def login_json(
+    request: Request,
+    credentials: LoginCredentials,
+    db: AsyncSession = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
+):
     """
     Login with JSON body (alternative to form).
+
+    LPDP: misma auditoría que ``/login`` — este es el endpoint que usa el
+    frontend, así que sin estos logs los accesos reales (y los intentos de
+    fuerza bruta por esta ruta) eran invisibles para ``audit_logs``.
     """
     # Ensure default users exist
     await ensure_default_users(db)
-    
+
     user = await authenticate_user(db, credentials.email, credentials.password)
-    
+    client_ip = request.client.host if request.client else None
+
     if not user:
+        await audit.log_access(
+            user_id="anonymous",
+            action="login_failed",
+            resource_type="user",
+            resource_id=credentials.email[:80],
+            ip_address=client_ip,
+            details={"reason": "invalid_credentials"},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email o contraseña incorrectos",
         )
-    
+
     if not user.is_active:
+        await audit.log_access(
+            user_id=str(user.id),
+            action="login_blocked",
+            resource_type="user",
+            resource_id=str(user.id),
+            ip_address=client_ip,
+            details={"reason": "user_inactive"},
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Usuario inactivo"
         )
-    
+
     access_token = create_access_token(
         data={"sub": str(user.id), "email": user.email}
     )
-    
+
+    await audit.log_access(
+        user_id=str(user.id),
+        action="login_success",
+        resource_type="user",
+        resource_id=str(user.id),
+        ip_address=client_ip,
+        details={"role": user.role},
+    )
+
     return Token(access_token=access_token, token_type="bearer")
 
 
@@ -286,20 +398,17 @@ async def get_me(current_user: UserResponse = Depends(get_current_active_user)):
 
 @router.put("/me", response_model=UserResponse)
 async def update_me(
-    update_data: dict,
+    update_data: UpdateMeRequest,
     current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Update current user profile.
-    """
+    """Update current user's own profile (full_name only — role/status are admin-only)."""
     user = await get_user_by_email(db, current_user.email)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    if "full_name" in update_data:
-        user.full_name = update_data["full_name"]
-    
+
+    user.full_name = update_data.full_name
+
     await db.commit()
     await db.refresh(user)
     
@@ -313,43 +422,28 @@ async def update_me(
 
 
 @router.post("/change-password")
+@limit("5/minute")
 async def change_password(
-    passwords: dict,
+    request: Request,
+    passwords: ChangePasswordRequest,
     current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Change current user's password.
-    """
+    """Change current user's password. Rate-limited to thwart brute force."""
     user = await get_user_by_email(db, current_user.email)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    current_password = passwords.get("current_password", "")
-    new_password = passwords.get("new_password", "")
-    
-    if not verify_password(current_password, user.hashed_password):
+
+    if not verify_password(passwords.current_password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Contraseña actual incorrecta"
         )
-    
-    user.hashed_password = get_password_hash(new_password)
+
+    user.hashed_password = get_password_hash(passwords.new_password)
     await db.commit()
-    
+
     return {"message": "Contraseña actualizada correctamente"}
-
-
-def get_current_admin_user(
-    current_user: UserResponse = Depends(get_current_active_user),
-) -> UserResponse:
-    """Dependency to get current admin user."""
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Se requieren privilegios de administrador"
-        )
-    return current_user
 
 
 # ============ Admin Endpoints (IT Admin Only) ============
@@ -432,77 +526,62 @@ async def delete_user(
 @router.put("/users/{user_id}/password")
 async def reset_user_password(
     user_id: UUID,
-    password_data: dict,
+    password_data: AdminResetPasswordRequest,
     current_user: UserResponse = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Reset a user's password (Admin only)."""
     user = await get_user_by_id(db, user_id)
-    
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    new_password = password_data.get("new_password")
-    if not new_password:
-        raise HTTPException(status_code=400, detail="Se requiere new_password")
-    
-    user.hashed_password = get_password_hash(new_password)
+
+    user.hashed_password = get_password_hash(password_data.new_password)
     await db.commit()
-    
+
     logger.info(f"Admin reset password for: {user.email}")
-    
     return {"message": "Contraseña restablecida"}
 
 
 @router.put("/users/{user_id}/role")
 async def update_user_role(
     user_id: UUID,
-    role_data: dict,
+    role_data: AdminUpdateRoleRequest,
     current_user: UserResponse = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Update a user's role (Admin only)."""
     user = await get_user_by_id(db, user_id)
-    
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    new_role = role_data.get("role")
-    if new_role not in ["admin", "recruiter"]:
-        raise HTTPException(status_code=400, detail="Rol inválido. Use 'admin' o 'recruiter'")
-    
-    if user.email == current_user.email and new_role != "admin":
+
+    if user.email == current_user.email and role_data.role != "admin":
         raise HTTPException(status_code=400, detail="No puedes quitarte el rol de admin")
-    
-    user.role = new_role
+
+    user.role = role_data.role
     await db.commit()
-    
-    logger.info(f"Admin updated role for {user.email} to {new_role}")
-    
-    return {"message": f"Rol actualizado a {new_role}"}
+
+    logger.info(f"Admin updated role for {user.email} to {role_data.role}")
+    return {"message": f"Rol actualizado a {role_data.role}"}
 
 
 @router.put("/users/{user_id}/status")
 async def update_user_status(
     user_id: UUID,
-    status_data: dict,
+    status_data: AdminUpdateStatusRequest,
     current_user: UserResponse = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Activate or deactivate a user (Admin only)."""
     user = await get_user_by_id(db, user_id)
-    
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
     if user.email == current_user.email:
         raise HTTPException(status_code=400, detail="No puedes desactivar tu propia cuenta")
-    
-    is_active = status_data.get("is_active", True)
-    user.is_active = is_active
+
+    user.is_active = status_data.is_active
     await db.commit()
-    
-    status_msg = "activado" if is_active else "desactivado"
+
+    status_msg = "activado" if status_data.is_active else "desactivado"
     logger.info(f"Admin {status_msg} user: {user.email}")
     
     return {"message": f"Usuario {status_msg}"}

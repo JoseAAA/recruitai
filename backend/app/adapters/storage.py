@@ -2,9 +2,11 @@
 MinIO S3-compatible Storage Adapter for RecruitAI.
 Handles file upload, download, and URL generation for CVs and Job Profiles.
 """
+import base64
 import io
 import logging
 import os
+import unicodedata
 from typing import Optional
 
 import boto3
@@ -63,7 +65,24 @@ class StorageService:
         """
         metadata = {}
         if filename:
-            metadata["original-filename"] = filename
+            # S3/MinIO metadata is restricted to ASCII per the AWS spec, so
+            # filenames with accents ("CV Alexander Callán Ponde.pdf") raise
+            # a ParamValidationError that previously caused the whole upload
+            # to fail silently. We store an ASCII-safe key for compatibility
+            # and a separate base64 key that preserves the exact original
+            # bytes for the download endpoint.
+            ascii_safe = (
+                unicodedata.normalize("NFKD", filename)
+                .encode("ascii", "ignore")
+                .decode("ascii")
+            )
+            metadata["original-filename"] = ascii_safe or "cv"
+            try:
+                metadata["original-filename-b64"] = base64.b64encode(
+                    filename.encode("utf-8")
+                ).decode("ascii")
+            except Exception:
+                pass
 
         self.client.put_object(
             Bucket=bucket,
@@ -86,9 +105,20 @@ class StorageService:
         file_bytes = response["Body"].read()
         content_type = response.get("ContentType", "application/octet-stream")
 
-        # Try to get original filename from metadata
+        # Try to get original filename from metadata. Prefer the base64-encoded
+        # UTF-8 form when present (preserves accents); fall back to the ASCII
+        # form for older uploads, finally to the object key.
         metadata = response.get("Metadata", {})
-        original_filename = metadata.get("original-filename", object_key.split("/")[-1])
+        original_filename = object_key.split("/")[-1]
+        if metadata.get("original-filename-b64"):
+            try:
+                original_filename = base64.b64decode(
+                    metadata["original-filename-b64"]
+                ).decode("utf-8")
+            except Exception:
+                original_filename = metadata.get("original-filename", original_filename)
+        elif metadata.get("original-filename"):
+            original_filename = metadata["original-filename"]
 
         return file_bytes, content_type, original_filename
 

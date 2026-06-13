@@ -6,7 +6,7 @@ import logging
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters import DocumentExtractor, EmbeddingService, LLMEngine
 from app.api.routes.auth import get_current_active_user, UserResponse
 from app.core.database import get_db
+from app.core.privacy import AuditLogger, get_audit_logger
+from app.core.validators import validate_pdf_bytes, validate_docx_bytes
 from app.db.models import CandidateDB, JobProfileDB
 from app.domain import DEFAULT_SCORING_CONFIG, EducationLevel, JobStatus, ScoringDimension
 
@@ -82,12 +84,17 @@ class JobListResponse(BaseModel):
 
 
 class ExtractedSkillsResponse(BaseModel):
+    """Respuesta del endpoint ``/jobs/analyze``: devuelve los campos que el LLM
+    extrajo del documento de vacante para que el frontend los pre-rellene en el
+    formulario (Human-in-the-loop)."""
+
     title: str
     department: Optional[str] = None
     description: Optional[str] = None
     seniority_level: Optional[str] = None
     work_modality: Optional[str] = None
     industry: Optional[str] = None
+    location: Optional[str] = None
     required_skills: List[str]
     preferred_skills: List[str]
     responsibilities: List[str] = Field(default_factory=list)
@@ -217,11 +224,58 @@ async def analyze_job_description(
         )
     
     text = description_text
-    
+
     if file:
         content = await file.read()
-        text, _ = await parser.parse_bytes(content, file.filename or "job.txt")
-    
+
+        # Same upload-safety pipeline as /candidates/upload — MIME magic +
+        # pikepdf structural check (rejects /JS, /Launch, /OpenAction, /AA)
+        # + oletools macro detection. Centralised in app.core.validators.
+        filename = file.filename or "job.txt"
+        ext = filename.rsplit(".", 1)[-1].lower()
+        if ext == "pdf":
+            ok, reason = validate_pdf_bytes(content)
+        elif ext == "docx":
+            ok, reason = validate_docx_bytes(content)
+        else:
+            ok, reason = True, None  # plain text / other → trust the parser
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=reason or "Archivo rechazado por validación de seguridad.",
+            )
+
+        text, doc_meta = await parser.parse_bytes(content, filename)
+
+        # Same hard-block as /candidates/upload: hidden-content attack vectors.
+        # Job descriptions can be used to plant instructions that would get
+        # stored in the job and replayed against every candidate during
+        # matching. Reject before persisting.
+        sec_warnings = doc_meta.get("security_warnings", [])
+        hidden_fragments = doc_meta.get("hidden_text_fragments", [])
+        blocking_kinds = ("[TEXTO_BLANCO]", "[TEXTO_MICRO]", "[TEXTO_FUERA]")
+        blocking_hits = [
+            f for f in hidden_fragments
+            if any(kind in f for kind in blocking_kinds) and len(f.strip()) > 25
+        ]
+        for w in sec_warnings:
+            if "JavaScript" in w or "capas opcionales" in w:
+                blocking_hits.append(w)
+        if blocking_hits:
+            logger.warning(
+                f"REJECTED job-profile upload {file.filename}: hidden-content attack vectors. "
+                f"First finding: {blocking_hits[0][:120]}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "ARCHIVO_RECHAZADO_SEGURIDAD: el documento contiene texto oculto "
+                    "(color casi blanco, fuente sub-1pt, fuera de página, JavaScript "
+                    "embebido o capas ocultas). Solo se usan para inyectar instrucciones "
+                    "al sistema de IA. Re-exporta el documento desde Word como texto plano."
+                ),
+            )
+
     try:
         # Extract using LLM
         extracted = await llm.extract_job_profile(text)
@@ -233,6 +287,7 @@ async def analyze_job_description(
             seniority_level=extracted.seniority_level,
             work_modality=extracted.work_modality,
             industry=extracted.industry,
+            location=extracted.location,
             required_skills=extracted.required_skills,
             preferred_skills=extracted.preferred_skills,
             responsibilities=extracted.responsibilities,
@@ -456,10 +511,17 @@ async def update_job(
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_job(
     job_id: UUID,
+    request: Request,
     current_user: UserResponse = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
 ):
-    """Delete a job profile and cascade-delete all its candidates (DB + Qdrant + MinIO)."""
+    """Delete a job profile and cascade-delete all its candidates (DB + Qdrant + MinIO).
+
+    LPDP: la eliminación de una vacante arrastra todos los CVs asociados —
+    es una cancelación masiva de PII. Queda registrada con el conteo de
+    candidatos afectados para auditoría posterior.
+    """
     result = await db.execute(
         select(JobProfileDB).where(JobProfileDB.id == job_id)
     )
@@ -502,10 +564,26 @@ async def delete_job(
         from sqlalchemy import delete as sql_delete
         await db.execute(sql_delete(CandidateDB).where(CandidateDB.job_id == job_id))
 
+    # Snapshot before delete
+    job_title_snapshot = job.title
+
     # Delete job
     await db.delete(job)
     await db.commit()
     logger.info(f"Deleted job {job_id} and {len(candidate_ids)} associated candidates")
+
+    # LPDP: registra la eliminación masiva (vacante + N CVs en cascada).
+    await audit.log_access(
+        user_id=str(current_user.id),
+        action="job_deleted",
+        resource_type="job",
+        resource_id=str(job_id),
+        ip_address=request.client.host if request.client else None,
+        details={
+            "job_title": job_title_snapshot,
+            "candidates_cascade_deleted": len(candidate_ids),
+        },
+    )
 
 
 @router.patch("/{job_id}/status")

@@ -3,9 +3,12 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: recruitai-qdrant
+    # Bind to localhost only — Qdrant has no auth on its REST API.
+    # The backend reaches it via the docker network (host=qdrant). Anything
+    # on the host's LAN/internet would otherwise read every embedding.
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
@@ -25,8 +28,12 @@ services:
   postgres:
     image: postgres:15-alpine
     container_name: recruitai-postgres
+    # Bind to localhost only — every CV (raw_text), every hashed password,
+    # and every audit log lives here. Exposing 5432 to the LAN/internet with
+    # the default password = full data breach. Backend reaches it via the
+    # docker network (host=postgres).
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-recruitai}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-recruitai_secret}
@@ -43,18 +50,126 @@ services:
       timeout: 5s
       retries: 5
 
+  # Embedding service — siempre encendido, INDEPENDIENTE del LLM
+  #
+  # Patrón "separation of inference services" (Chip Huyen, Eugene Yan,
+  # Hugging Face). Embeddings y generación tienen perfiles de carga distintos
+  # y deben escalar por separado:
+  #   - LLM      → 1 llamada por matching, GPU pesada, puede ser cloud (Ollama / Groq / Gemini / OpenAI)
+  #   - Embed    → 4-N llamadas por CV, CPU ligera, SIEMPRE local
+  #
+  # Si el cliente apaga Ollama (modo cloud), la búsqueda semántica sigue
+  # funcionando porque este servicio no depende del LLM.
+  #
+  # Modelo: Snowflake/snowflake-arctic-embed-m-v2.0
+  #   - 768 dim (coincide con la colección Qdrant actual — no hay que re-indexar)
+  #   - Apache 2.0, on-prem total
+  #   - Entrenado y benchmarkeado en ES/EN/DE/FR/IT (top tier multilingüe)
+  #   - ~1.2 GB en disco, ~600 MB RAM
+  embeddings:
+    # Imagen GPU específica para Ampere SM_86 (RTX 3060). TEI tiene tags por
+    # arquitectura CUDA porque optimiza kernels diferentes:
+    #   - turing-1.X  → T4, RTX 2000
+    #   - 86-1.X      → Ampere (RTX 3060, A30) ← este
+    #   - 89-1.X      → Ada Lovelace (RTX 4000)
+    #   - hopper-1.X  → H100
+    #
+    # IMPORTANTE: el sufijo de versión depende del CUDA del driver del host:
+    #   - 86-1.9 requiere CUDA driver ≥ 12.9
+    #   - 86-1.8 requiere CUDA driver ≥ 12.4  ← usado aquí (compat ≥ 12.7)
+    #   - 86-1.7 requiere CUDA driver ≥ 12.2
+    # Verifica con: docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi
+    # Si el cliente final tiene driver más nuevo, subir a 86-1.9 sin problema.
+    image: ghcr.io/huggingface/text-embeddings-inference:86-1.8
+    container_name: recruitai-embeddings
+    # NOTA OPERATIVA: si ``docker pull`` devuelve "denied", se debe a una
+    # credencial caducada de ghcr.io en Docker Desktop. Solución:
+    #   docker logout ghcr.io
+    # Y reintentar. Es bug conocido (community discussion #43380), no del
+    # repositorio de Hugging Face — los tags x86_64 son públicos.
+    #
+    # POR QUÉ GPU EN VEZ DE CPU:
+    # En CPU, ONNX Runtime cargaba el modelo arctic-embed-m-v2.0 en fp32 y
+    # creaba pools de threads del tamaño de #CPUs → ~7-8 GB de RAM solo para
+    # un modelo de 305M params (que en GPU usa ~700 MB de VRAM). Tuning de
+    # CPU bajaba a ~2 GB pero al límite, sin margen. GPU es 10× más rápido
+    # y deja libre la RAM del sistema.
+    #
+    # NO compite con Ollama cuando ``LLM_PROVIDER=ollama`` siempre y cuando
+    # el modelo de generación quepa también. Gemma3:4b (~3.5 GB VRAM) +
+    # arctic-embed-m (~700 MB) = ~4.2 GB de los 6 GB disponibles → cabe.
+    command:
+      - --model-id=Snowflake/snowflake-arctic-embed-m-v2.0
+      - --port=8080
+      # Tokenización ocurre en CPU incluso en modo GPU. Limitar workers
+      # baja la RAM de 2.4 GB → ~1 GB sin perder throughput para 3 analistas.
+      - --tokenization-workers=2
+      - --max-concurrent-requests=10
+      - --max-batch-tokens=16384
+    environment:
+      # HF_HOME apunta al volumen persistente → modelo descargado una sola vez.
+      - HF_HOME=/data
+      # Limita pools de OMP/Rayon (CPU side, no afecta GPU).
+      - OMP_NUM_THREADS=2
+      - RAYON_NUM_THREADS=2
+    volumes:
+      - embeddings_cache:/data
+    networks:
+      - recruitai-network
+    restart: unless-stopped
+    # Asignación de GPU: el container ve la RTX 3060 vía NVIDIA Container
+    # Toolkit. Requiere Docker Desktop con WSL2 + GPU support habilitado
+    # (viene por defecto desde 2023).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      # TEI expone /health en el mismo puerto. El backend espera a que el
+      # modelo esté cargado antes de aceptar requests (depends_on healthy).
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # Primer arranque: descarga safetensors (~600 MB) + warm-up GPU.
+      # En GPU el warm-up es 5-10x más rápido que en CPU (~10-20 s).
+      start_period: 180s
+
   # Ollama for local LLM inference
+  #
+  # PROFILE "local-llm": este servicio SOLO se levanta cuando se usa Ollama
+  # local. Si el cliente configura LLM_PROVIDER=groq/gemini/openai en su .env,
+  # Ollama queda apagado y libera ~3 GB de RAM + toda la VRAM de la GPU.
+  #
+  # Activación automática: los scripts ``scripts/start.ps1`` y
+  # ``scripts/start.sh`` añaden ``--profile local-llm`` cuando detectan
+  # LLM_PROVIDER=ollama. Manual: ``docker compose --profile local-llm up -d``.
+  #
+  # Nota: ya NO sirve embeddings — eso lo hace el servicio ``embeddings``
+  # de arriba. Ollama queda solo para generación (LLM).
   ollama:
+    profiles: ["local-llm"]
     image: ollama/ollama:latest
     container_name: recruitai-ollama
-    ports:
-      - "11434:11434"
+    # NO host port published. The backend reaches Ollama via the docker
+    # network (http://ollama:11434). Publishing 11434 to the host would
+    # (a) collide with a native Ollama Windows install, and (b) expose an
+    # unauthenticated LLM API to anything that can reach the host.
+    # To manage models from your shell use:
+    #   docker exec recruitai-ollama ollama list
+    #   docker exec recruitai-ollama ollama pull <model>
     volumes:
       - ollama_data:/root/.ollama
     environment:
       - OLLAMA_FLASH_ATTENTION=1        # 20-40% faster attention on GPU
       - OLLAMA_KEEP_ALIVE=5m            # Descarga el modelo tras 5 min sin uso (libera ~5.5GB RAM)
-      - OLLAMA_NUM_PARALLEL=3           # 3 requests simultáneos (gemma3:4b cabe holgado en 6GB VRAM)
+      # OLLAMA_NUM_PARALLEL=2: con OLLAMA_NUM_CTX=16384 cada slot consume ~1GB de KV cache.
+      # En RTX 3060 6GB: 3.3GB modelo + 2×1GB KV + 0.5GB embed + buffer ≈ 6.1GB → al límite.
+      # Con 3 paralelos había OOM. Debe coincidir con LLM_MATCH_CONCURRENCY del backend.
+      - OLLAMA_NUM_PARALLEL=2
       - OLLAMA_MAX_LOADED_MODELS=2      # gemma3:4b + nomic-embed-text
     networks:
       - recruitai-network
@@ -77,9 +192,12 @@ services:
   minio:
     image: minio/minio:latest
     container_name: recruitai-minio
+    # Bind to localhost only — MinIO holds the original PDFs/DOCXs of every
+    # CV. Default credentials + public port = anyone can list and download
+    # every CV. Console (:9001) also stays local-only.
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Web Console
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # Web Console
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-recruitai}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-recruitai_secret}
@@ -102,7 +220,10 @@ services:
       dockerfile: Dockerfile
     container_name: recruitai-backend
     ports:
-      - "8000:8000"
+      # localhost-only: la única puerta de entrada en red es nginx (:80).
+      # Sin esto, cualquier equipo de la LAN podía llamar a la API directo
+      # saltándose el proxy. Swagger local sigue disponible en 127.0.0.1:8000/docs.
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env                          # Fuente única de configuración
     environment:
@@ -117,11 +238,24 @@ services:
     volumes:
       - ./backend:/app
       - ./uploads:/app/uploads
+    # depends_on en formato extendido para poder:
+    #  - marcar Ollama como opcional (required: false) — depende del profile
+    #  - esperar a que ``embeddings`` esté HEALTHY (no solo started) porque
+    #    el primer arranque descarga el modelo y el backend fallaría si trata
+    #    de embeddear antes de que TEI termine de cargarlo.
+    # Requiere Docker Compose v2.20+ (2024+).
     depends_on:
-      - qdrant
-      - postgres
-      - ollama
-      - minio
+      qdrant:
+        condition: service_started
+      postgres:
+        condition: service_started
+      minio:
+        condition: service_started
+      embeddings:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+        required: false
     restart: unless-stopped
     networks:
       - recruitai-network
@@ -139,9 +273,17 @@ services:
       dockerfile: Dockerfile
     container_name: recruitai-frontend
     ports:
-      - "3000:3000"
+      # localhost-only: los usuarios entran por nginx (:80), no por :3000.
+      - "127.0.0.1:3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      # Vacío = el frontend llama a la API same-origin (/api) a través de
+      # nginx. Así la misma imagen funciona en localhost y en el servidor
+      # de la empresa sin tocar configuración. Solo definir una URL absoluta
+      # para desarrollo sin nginx.
+      - NEXT_PUBLIC_API_URL=
+      # Destino del rewrite /api/* del dev server de Next (next.config.js):
+      # permite que el acceso directo a :3000 funcione sin pasar por nginx.
+      - BACKEND_INTERNAL_URL=http://backend:8000
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -183,6 +325,7 @@ volumes:
   postgres_data:
   ollama_data:
   minio_data:
+  embeddings_cache:   # cache del modelo descargado por TEI (~1.2 GB)
 
 
 networks:

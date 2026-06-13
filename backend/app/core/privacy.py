@@ -19,6 +19,11 @@ from enum import Enum
 from dataclasses import dataclass
 import json
 
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+
 logger = logging.getLogger(__name__)
 
 
@@ -410,10 +415,7 @@ class ARCOPHandler:
         }
 
 
-# Singleton instances
 _consent_manager: Optional[ConsentManager] = None
-_audit_logger: Optional[AuditLogger] = None
-_arcop_handler: Optional[ARCOPHandler] = None
 
 
 def get_consent_manager() -> ConsentManager:
@@ -424,17 +426,32 @@ def get_consent_manager() -> ConsentManager:
     return _consent_manager
 
 
-def get_audit_logger() -> AuditLogger:
-    """Obtiene instancia singleton del logger de auditoría."""
-    global _audit_logger
-    if _audit_logger is None:
-        _audit_logger = AuditLogger()
-    return _audit_logger
+# ============ FastAPI Dependencies ============
+#
+# AuditLogger NO es singleton — necesita la sesión DB del request actual para
+# persistir los logs a PostgreSQL. LPDP Perú obliga trazabilidad real, no en
+# memoria, y el DS 115-2025-PCM exige auditabilidad de cada decisión de IA.
+#
+# Uso en endpoints:
+#     from app.core.privacy import AuditLogger, get_audit_logger
+#
+#     @router.post("/foo")
+#     async def foo(audit: AuditLogger = Depends(get_audit_logger)):
+#         await audit.log_access(...)
 
 
-def get_arcop_handler() -> ARCOPHandler:
-    """Obtiene instancia singleton del manejador ARCO-P."""
-    global _arcop_handler
-    if _arcop_handler is None:
-        _arcop_handler = ARCOPHandler()
-    return _arcop_handler
+def get_audit_logger(db: AsyncSession = Depends(get_db)) -> AuditLogger:
+    """FastAPI dependency: AuditLogger con sesión DB inyectada por request.
+
+    Cada request obtiene su propia instancia con la sesión SQLAlchemy del
+    pool, de manera que los logs se persisten en la misma transacción que
+    el resto de la operación. Esto es lo que cumple el requisito de
+    trazabilidad real de la LPDP Perú (Ley 29733) y la auditabilidad del
+    Reglamento de IA (DS 115-2025-PCM).
+    """
+    return AuditLogger(db_session=db)
+
+
+def get_arcop_handler(db: AsyncSession = Depends(get_db)) -> ARCOPHandler:
+    """FastAPI dependency: ARCOPHandler con sesión DB inyectada."""
+    return ARCOPHandler(db_session=db, audit_logger=AuditLogger(db_session=db))

@@ -1,10 +1,15 @@
 """
 Security utilities for JWT authentication.
+
+Uses PyJWT (jpadilla/pyjwt) — actively maintained, replaces python-jose
+which had unresolved CVE-2024-33664 (DoS) and CVE-2024-33663 (algorithm
+confusion). API is near-identical so the migration is mechanical.
 """
 from datetime import datetime, timedelta
 from typing import Optional
 
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWTError
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
@@ -33,39 +38,43 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
+_JWT_ISSUER = "recruitai"
+_JWT_AUDIENCE = "recruitai-api"
+
+
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create JWT access token."""
+    """Create JWT access token with explicit issuer/audience binding."""
     to_encode = data.copy()
-    
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
-    
-    to_encode.update({"exp": expire})
-    
-    encoded_jwt = jwt.encode(
-        to_encode,
-        settings.JWT_SECRET,
-        algorithm=settings.JWT_ALGORITHM
-    )
-    return encoded_jwt
+    now = datetime.utcnow()
+    expire = now + (expires_delta or timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
+    # iss/aud bind the token to this app — a leaked secret used by another
+    # service can't mint tokens accepted here. iat/nbf/exp anchor the validity
+    # window. The "sub" claim should be the user's UUID (set by callers).
+    to_encode.update({
+        "exp": expire,
+        "iat": now,
+        "nbf": now,
+        "iss": _JWT_ISSUER,
+        "aud": _JWT_AUDIENCE,
+    })
+    return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
 def decode_token(token: str) -> Optional[TokenData]:
-    """Decode and validate JWT token."""
+    """Decode and validate JWT token. Verifies signature, exp, iat, iss, aud."""
     try:
         payload = jwt.decode(
             token,
             settings.JWT_SECRET,
-            algorithms=[settings.JWT_ALGORITHM]
+            algorithms=[settings.JWT_ALGORITHM],
+            audience=_JWT_AUDIENCE,
+            issuer=_JWT_ISSUER,
+            options={"require": ["exp", "iat", "sub"]},
         )
         user_id: str = payload.get("sub")
         email: str = payload.get("email")
-        
         if user_id is None:
             return None
-            
         return TokenData(user_id=user_id, email=email)
-    except JWTError:
+    except PyJWTError:
         return None

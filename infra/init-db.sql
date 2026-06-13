@@ -287,6 +287,18 @@ BEGIN
     END IF;
 END $$;
 
+-- Migration: Add degree_status to education_entries
+-- Captura el progreso académico (Titulado, Bachiller, Egresado, En curso,
+-- Cursando, Culminado, Colegiado, Inconcluso). Crítico en Perú para roles
+-- regulados — distingue, p.ej., un Ingeniero "Bachiller" de uno "Colegiado".
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='education_entries' AND column_name='degree_status') THEN
+        ALTER TABLE education_entries ADD COLUMN degree_status VARCHAR(50);
+    END IF;
+END $$;
+
 -- Migration: Add required_languages to job_profiles
 DO $$
 BEGIN
@@ -313,3 +325,20 @@ BEGIN
         ALTER TABLE candidates ADD COLUMN idiomas JSONB DEFAULT '[]'::jsonb;
     END IF;
 END $$;
+
+-- ── Performance indexes (high-impact hot paths) ─────────────────────────────
+-- Composite (job_id, status) for kanban queries that filter both at once.
+CREATE INDEX IF NOT EXISTS idx_candidates_job_status ON candidates(job_id, status);
+-- Recent-candidates ordering on dashboard / list pages.
+CREATE INDEX IF NOT EXISTS idx_candidates_created_at ON candidates(created_at DESC);
+-- FK joins on every candidate detail page (3 queries → 1 with selectinload).
+CREATE INDEX IF NOT EXISTS idx_experience_candidate_id ON experience_entries(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_education_candidate_id ON education_entries(candidate_id);
+-- Match-results lookup keyed on candidate (e.g. when the recruiter opens a candidate detail and we want to show their scores across jobs).
+CREATE INDEX IF NOT EXISTS idx_match_results_candidate ON match_results(candidate_id);
+-- Composite for the notes list (filter by candidate, sort by created_at DESC).
+-- Replaces the standalone idx_candidate_notes_created which is too generic.
+CREATE INDEX IF NOT EXISTS idx_candidate_notes_candidate_created
+    ON candidate_notes(candidate_id, created_at DESC);
+-- Recent-jobs ordering on the dashboard.
+CREATE INDEX IF NOT EXISTS idx_job_profiles_created_at ON job_profiles(created_at DESC);
