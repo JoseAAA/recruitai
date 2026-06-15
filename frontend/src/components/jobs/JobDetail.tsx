@@ -26,42 +26,32 @@ const REC_BG: Record<string, string> = {
     "No recomendado":        "bg-slate-100 dark:bg-slate-700/30 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-600",
 };
 
-// Indicador de progreso del análisis IA: cronómetro real + barra estimada.
-// Sin tecnicismos ni nombres de proveedor (regla AGENTS.md §7) — antes decía
-// "~30 segundos por candidato en Ollama local" incluso usando la nube.
-// La barra avanza hacia un estimado conservador (~12s/candidato) y se frena
-// en 95% — nunca dice "casi listo" si no le consta.
+// Indicador de progreso del análisis IA: spinner + cronómetro real, SIN barra de
+// porcentaje ni conteo "X de N". Motivo: el matching evalúa a TODOS los candidatos
+// en UNA sola petición, así que el navegador no recibe el avance uno por uno; un
+// "30%" o "3 de 8" sería inventado (y con la nube, rápida, "saltaba" a terminado,
+// lo que confundía: parecía que se saltó candidatos). Mostramos solo el tiempo y
+// explicamos que el ranking llega completo al final.
+// (Sin tecnicismos ni nombres de proveedor — regla AGENTS.md §7.)
 function MatchProgress({ candidateCount }: { candidateCount: number }) {
     const [elapsed, setElapsed] = useState(0);
     useEffect(() => {
         const t = setInterval(() => setElapsed((e) => e + 1), 1000);
         return () => clearInterval(t);
     }, []);
-    const estimate = Math.max(40, candidateCount * 12);
-    const pct = Math.min(95, Math.round((elapsed / estimate) * 100));
     const mm = Math.floor(elapsed / 60);
     const ss = String(elapsed % 60).padStart(2, "0");
     return (
         <div className="py-16 flex flex-col items-center gap-4 text-slate-500 px-8">
             <span className="material-symbols-outlined text-[40px] text-primary animate-spin">sync</span>
-            <p className="text-sm font-medium">
-                Evaluando {candidateCount} candidato{candidateCount !== 1 ? "s" : ""} con IA...
+            <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                Analizando {candidateCount} candidato{candidateCount !== 1 ? "s" : ""} con IA…
             </p>
-            <div className="w-full max-w-xs">
-                <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
-                    <div
-                        className="h-full bg-primary rounded-full transition-all duration-1000"
-                        style={{ width: `${pct}%` }}
-                    />
-                </div>
-                <div className="flex justify-between mt-1.5 text-[11px] text-slate-400">
-                    <span>{pct}% estimado</span>
-                    <span>{mm}:{ss} transcurrido</span>
-                </div>
-            </div>
+            <p className="text-xs text-slate-400 tabular-nums">{mm}:{ss} transcurrido</p>
             <p className="text-xs text-slate-400 text-center max-w-sm">
-                Cada candidato se evalúa individualmente. Puede tomar unos minutos —
-                no cierres esta pantalla.
+                Los {candidateCount} candidato{candidateCount !== 1 ? "s se evalúan" : " se evalúa"} en
+                un solo análisis, así que el ranking aparece completo al terminar (no de a uno).
+                Puede tomar un momento — no cierres esta pantalla.
             </p>
         </div>
     );

@@ -10,7 +10,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from qdrant_client.http.models import (
     Distance, VectorParams,
-    HnswConfigDiff, ScalarQuantizationConfig, ScalarType, QuantizationConfig,
+    HnswConfigDiff, ScalarQuantizationConfig, ScalarType, ScalarQuantization,
     SearchParams,
 )
 
@@ -57,7 +57,14 @@ class QdrantRepository:
             # 4x memory reduction with <1% quality loss for nomic-embed-text.
             # Ref: Qdrant quantization docs; "Product Quantization for Nearest Neighbor Search"
             # (Jégou et al., 2011)
-            quantization_config = QuantizationConfig(
+            #
+            # NOTA: la clase a instanciar es `ScalarQuantization` (envoltorio con el
+            # campo `scalar`), NO `QuantizationConfig`. Esto último es un `typing.Union`
+            # de qdrant-client (Scalar|Product|Binary) usado solo como type hint —
+            # instanciarlo lanza "Cannot instantiate typing.Union". El bug quedaba
+            # latente porque este bloque solo corre al CREAR la colección por primera
+            # vez (BD vacía); con datos preexistentes nunca se ejecutaba.
+            quantization_config = ScalarQuantization(
                 scalar=ScalarQuantizationConfig(
                     type=ScalarType.INT8,
                     quantile=0.99,  # preserve 99th percentile range (avoids outlier clipping)

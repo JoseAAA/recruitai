@@ -3,6 +3,7 @@ LLM Providers - Multi-provider abstraction for LLM integrations.
 Supports: Ollama (local), OpenAI, Google Gemini
 """
 import asyncio
+import copy
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -16,6 +17,52 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+# Palabras clave de validación que OpenAI Structured Outputs (strict) NO soporta
+# y que harían rechazar el esquema con HTTP 400. Se eliminan en la conversión.
+_OPENAI_UNSUPPORTED_SCHEMA_KEYS = (
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+    "minLength", "maxLength", "pattern", "format",
+    "minItems", "maxItems", "uniqueItems", "multipleOf", "default",
+)
+
+
+def to_openai_strict_schema(schema: dict) -> dict:
+    """Adapta un JSON Schema al *strict mode* de OpenAI Structured Outputs.
+
+    OpenAI, en strict mode, EXIGE que cada objeto tenga ``additionalProperties:
+    false`` y que TODAS sus propiedades estén en ``required``; y NO admite
+    palabras de validación (minimum/maximum/pattern/…). Aquí están definidos los
+    mismos esquemas que usa Ollama por *constrained decoding*, así que los
+    convertimos en vivo en lugar de duplicarlos.
+
+    Trabaja sobre una COPIA (los esquemas son atributos de clase reutilizados, no
+    deben mutarse). Los campos antes opcionales quedan requeridos; si su tipo
+    admite ``null`` el modelo puede devolver null, y el parser downstream ya
+    tolera null/ausencia. El resultado es un esquema que OpenAI acepta y que
+    obliga al modelo a producir TODOS los campos (p. ej. ``guia_entrevista``).
+    """
+    s = copy.deepcopy(schema)
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for k in _OPENAI_UNSUPPORTED_SCHEMA_KEYS:
+                node.pop(k, None)
+            if node.get("type") == "object" and isinstance(node.get("properties"), dict):
+                for v in node["properties"].values():
+                    _walk(v)
+                node["additionalProperties"] = False
+                node["required"] = list(node["properties"].keys())
+            if isinstance(node.get("items"), dict):
+                _walk(node["items"])
+            for combiner in ("anyOf", "oneOf", "allOf"):
+                if isinstance(node.get(combiner), list):
+                    for sub in node[combiner]:
+                        _walk(sub)
+        return node
+
+    return _walk(s)
 
 
 class LLMRateLimitError(Exception):
@@ -270,6 +317,11 @@ class OpenAIProvider(LLMProvider):
     # Etiqueta del proveedor para logging y ``name``. Subclases lo cambian.
     _provider_label: str = "OpenAI"
 
+    # ¿El proveedor soporta OpenAI Structured Outputs (response_format json_schema
+    # con strict)? OpenAI sí. Las subclases lo apagan si su API aún no lo soporta
+    # bien (p. ej. Groq) y caen a json_object para no romper con un 400.
+    _supports_structured_outputs: bool = True
+
     def __init__(self):
         self.api_key = settings.OPENAI_API_KEY
         self.model = settings.OPENAI_MODEL
@@ -330,7 +382,21 @@ class OpenAIProvider(LLMProvider):
             "temperature": temperature,
             "max_tokens": max_tokens
         }
-        if json_mode:
+        # Structured Outputs: si nos pasan un json_schema y el proveedor lo
+        # soporta (OpenAI sí), forzamos el esquema EXACTO igual que Ollama con
+        # constrained decoding. Sin esto, el modelo solo recibía "devuelve JSON"
+        # y omitía campos obligatorios (p. ej. guia_entrevista) o era menos
+        # disciplinado. Ver to_openai_strict_schema para la conversión.
+        if json_schema and self._supports_structured_outputs:
+            request_body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "respuesta",
+                    "strict": True,
+                    "schema": to_openai_strict_schema(json_schema),
+                },
+            }
+        elif json_mode:
             request_body["response_format"] = {"type": "json_object"}
 
         # Reintento ante 429 (cuota: Groq free = 12k tokens/min, Retry-After
@@ -389,6 +455,11 @@ class GroqProvider(OpenAIProvider):
     """
 
     _provider_label = "Groq"
+
+    # Groq aún no soporta de forma fiable Structured Outputs (response_format
+    # json_schema strict) en todos sus modelos. Mantenemos json_object hasta
+    # validarlo, para no romper con un 400. Cuando se verifique, poner True.
+    _supports_structured_outputs = False
 
     def __init__(self):
         # Saltamos super().__init__() porque sobreescribimos los 3 atributos

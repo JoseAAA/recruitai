@@ -338,7 +338,7 @@ class LLMEngine:
         "required": [
             "_razonamiento_previo",
             "skills_score", "experience_score", "education_score",
-            "explanation", "recommendation", "missing_critical_skills",
+            "explanation", "missing_critical_skills",
             "guia_entrevista",
         ],
         "properties": {
@@ -351,10 +351,9 @@ class LLMEngine:
             "experience_score": {"type": "number", "minimum": 0, "maximum": 100},
             "education_score": {"type": "number", "minimum": 0, "maximum": 100},
             "explanation": {"type": "string"},
-            "recommendation": {
-                "type": "string",
-                "enum": ["Altamente recomendado", "Buena opción", "Considerar", "No recomendado"],
-            },
+            # recommendation NO va en el esquema: la deriva el código del Score
+            # Global (ver recommendation_from_overall en search.py) para que el
+            # número mostrado y la etiqueta sean siempre coherentes.
             "missing_critical_skills": {
                 "type": "array",
                 "items": {"type": "string"},

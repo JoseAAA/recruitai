@@ -175,7 +175,7 @@ export const candidatesApi = {
         formData.append("file", file);
         if (jobId) formData.append("job_id", jobId);
         return api.post<UploadResponse>("/candidates/upload", formData, {
-            timeout: 120000, // 2 minutes per file — LLM extraction is slow on CPU
+            timeout: 180000, // 3 min/archivo: la extracción con LLM es lenta (sobre todo Ollama local)
         });
     },
 
@@ -198,13 +198,21 @@ export const candidatesApi = {
                     const response = await candidatesApi.upload(file, jobId);
                     results[globalIdx] = response.data;
                 } catch (error: any) {
+                    // Un timeout/corte de conexión no trae response.data.detail.
+                    // Con Ollama local la extracción puede tardar y el backend
+                    // suele terminar igual, así que damos un mensaje honesto en
+                    // vez de un "Error" que asusta cuando el CV sí se guardó.
+                    const timedOut = error.code === "ECONNABORTED" || !error.response;
                     results[globalIdx] = {
                         id: "",
                         filename: file.name,
                         status: "error",
                         extracted_name: null,
                         skills_count: 0,
-                        message: error.response?.data?.detail || "Error al procesar",
+                        message: error.response?.data?.detail ||
+                            (timedOut
+                                ? "Tardó más de lo normal; el CV puede haberse guardado igual — revisa la lista antes de re-subirlo."
+                                : "Error al procesar"),
                     };
                 } finally {
                     completed++;
@@ -263,9 +271,10 @@ export const jobsApi = {
         const formData = new FormData();
         if (file) formData.append("file", file);
         if (text) formData.append("description_text", text);
-        // Pass headers:{} so axios merges an empty object — combined with the
-        // interceptor this guarantees Content-Type is never application/json.
-        return api.post("/jobs/analyze", formData, { headers: {} });
+        // headers:{} para que el interceptor no fuerce application/json.
+        // timeout 180s: con Ollama local el análisis del documento puede tomar ~40 s;
+        // sin un timeout explícito el navegador se rendía antes y mostraba "Error".
+        return api.post("/jobs/analyze", formData, { headers: {}, timeout: 180000 });
     },
 
     getScoringPresets: () =>

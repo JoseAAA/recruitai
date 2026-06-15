@@ -1,0 +1,37 @@
+# Evita enviar a Docker como "contexto de build" archivos que no deben ir en
+# la imagen o que la hacen más pesada/lenta. La imagen instala todo desde
+# requirements.txt; el código fuente se copia con COPY . .
+
+# Cachés y artefactos de Python
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+.coverage
+htmlcov
+
+# Entornos virtuales locales (la imagen tiene el suyo)
+.venv
+venv
+env
+
+# Subidas de CVs / datos locales — PII, NO van en la imagen
+uploads
+*.sqlite
+*.db
+
+# Git / editor
+.git
+.gitignore
+.vscode
+.idea
+
+# Entorno (las variables van por docker-compose env_file, no en la imagen)
+.env
+.env.*
+!.env.example
+
+.DS_Store

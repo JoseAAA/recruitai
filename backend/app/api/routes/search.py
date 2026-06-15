@@ -648,7 +648,11 @@ async def match_candidates_to_job(
             experience_score = reasoning["experience_score"]
             education_score  = reasoning["education_score"]
             explanation      = reasoning["explanation"]
-            overall_score    = compute_overall(skills_score, experience_score, education_score)
+            # Redondeamos el Score Global a entero ANTES de derivar la
+            # recomendación, para que el número mostrado y la etiqueta sean
+            # siempre coherentes (si no, dos candidatos que muestran "85" —uno
+            # 84.7 y otro 85.4— recibían recomendaciones distintas).
+            overall_score    = round(min(compute_overall(skills_score, experience_score, education_score), 100))
 
             # Recomendación DERIVADA del Score Global (ver recommendation_from_overall
             # arriba). Antes se usaba reasoning["recommendation"] —la etiqueta libre
@@ -679,14 +683,14 @@ async def match_candidates_to_job(
             return MatchResultResponse(
                 candidate_id=str(candidate.id),
                 full_name=candidate.full_name,
-                overall_score=round(min(overall_score, 100), 1),
-                experience_score=round(experience_score, 1),
-                education_score=round(education_score, 1),
-                skills_score=round(skills_score, 1),
+                overall_score=overall_score,
+                experience_score=round(experience_score),
+                education_score=round(education_score),
+                skills_score=round(skills_score),
                 dimension_scores={
-                    "skills":     round(skills_score, 1),
-                    "experience": round(experience_score, 1),
-                    "education":  round(education_score, 1),
+                    "skills":     round(skills_score),
+                    "experience": round(experience_score),
+                    "education":  round(education_score),
                 },
                 explanation=explanation,
                 recommendation=recommendation,
@@ -737,14 +741,14 @@ async def match_candidates_to_job(
                 # Nombre fresco de la DB primero: si el reclutador corrigió el
                 # nombre después del último scoring, el caché no debe mostrarlo viejo.
                 full_name=cand.full_name or row.candidate_name,
-                overall_score=row.overall_score,
-                experience_score=row.experience_score or 0,
-                education_score=row.education_score or 0,
-                skills_score=row.skills_score or 0,
+                overall_score=round(row.overall_score or 0),
+                experience_score=round(row.experience_score or 0),
+                education_score=round(row.education_score or 0),
+                skills_score=round(row.skills_score or 0),
                 dimension_scores={
-                    "skills":     round(row.skills_score or 0, 1),
-                    "experience": round(row.experience_score or 0, 1),
-                    "education":  round(row.education_score or 0, 1),
+                    "skills":     round(row.skills_score or 0),
+                    "experience": round(row.experience_score or 0),
+                    "education":  round(row.education_score or 0),
                 },
                 explanation=row.explanation or "",
                 recommendation=row.recommendation or "Considerar",
@@ -918,9 +922,9 @@ async def get_comparison_data(
 
     if match:
         radar_data = [
-            RadarDataPoint(axis="Habilidades", candidate_value=round(match.skills_score or 0, 1)),
-            RadarDataPoint(axis="Experiencia", candidate_value=round(match.experience_score or 0, 1)),
-            RadarDataPoint(axis="Educación", candidate_value=round(match.education_score or 0, 1)),
+            RadarDataPoint(axis="Habilidades", candidate_value=round(match.skills_score or 0)),
+            RadarDataPoint(axis="Experiencia", candidate_value=round(match.experience_score or 0)),
+            RadarDataPoint(axis="Educación", candidate_value=round(match.education_score or 0)),
         ]
         gap_analysis = {
             "missing_skills": (match.missing_skills or [])[:10],
@@ -937,7 +941,7 @@ async def get_comparison_data(
         else:
             skills_score = 100.0  # sin requisitos no hay brecha que penalizar
         radar_data = [
-            RadarDataPoint(axis="Habilidades", candidate_value=round(skills_score, 1)),
+            RadarDataPoint(axis="Habilidades", candidate_value=round(skills_score)),
         ]
         gap_analysis = {
             "missing_skills": sorted(required_skills - candidate_skills)[:10],

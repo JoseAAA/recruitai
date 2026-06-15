@@ -230,7 +230,16 @@ const CreateVacancy: React.FC = () => {
             if (!data.required_languages?.length) warnings.push("No se detectaron requisitos de idioma — si el inglés u otro idioma es relevante, agrégalo.");
             setJdWarnings(warnings);
         } catch (err: any) {
-            setAnalyzeError(err.response?.data?.detail || "Error al analizar el documento");
+            // Un timeout/corte de conexión no trae response.data.detail. Con
+            // Ollama local el análisis puede tomar ~40 s: es lentitud, no un
+            // error real. Mensaje honesto en vez de "Error al analizar".
+            const timedOut = err.code === "ECONNABORTED" || !err.response;
+            setAnalyzeError(
+                err.response?.data?.detail ||
+                (timedOut
+                    ? "El análisis está tardando más de lo normal (con el modelo local puede tomar ~40 s). Espera unos segundos y vuelve a intentar."
+                    : "Error al analizar el documento"),
+            );
             setUploadedFileName(null);
         } finally {
             setIsAnalyzing(false);

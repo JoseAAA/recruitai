@@ -1,3 +1,9 @@
+# Nombre fijo del proyecto Compose. Sin esto, Docker deriva el nombre de la
+# carpeta; si la carpeta se renombra (p.ej. analisis-cv → recruitai), el
+# proyecto/volúmenes/contenedores quedan "pegados" al nombre viejo y aparecen
+# contenedores fantasma. Fijarlo aquí garantiza que TODO sea siempre "recruitai".
+name: recruitai
+
 services:
   # Vector Database for semantic search
   qdrant:

@@ -1,0 +1,29 @@
+# Evita enviar a Docker como "contexto de build" archivos pesados o que se
+# regeneran dentro de la imagen. Sin esto, el node_modules local (decenas de
+# miles de archivos) se empaqueta y se sube al daemon en cada build → lento.
+node_modules
+.next
+out
+build
+dist
+
+# Logs y temporales
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Git / editor
+.git
+.gitignore
+.vscode
+.idea
+
+# Entorno (las variables van por docker-compose / runtime, no en la imagen)
+.env
+.env.*
+!.env.example
+
+# Misc
+.DS_Store
+README.md

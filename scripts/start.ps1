@@ -106,11 +106,21 @@ else {
     $modeLabel = "☁️  $($provider.ToUpper()) CLOUD (Ollama apagado, libera RAM/GPU)"
     $piiStatus = "PII masking: ON (auto, datos van fuera)"
 
-    # Si Ollama estaba corriendo, lo paramos para liberar recursos
-    $ollamaRunning = docker ps --filter "name=recruitai-ollama" --format "{{.Names}}" 2>$null
-    if ($ollamaRunning -eq "recruitai-ollama") {
-        Write-Host "Detectado Ollama corriendo — apagándolo para liberar recursos..." -ForegroundColor Yellow
-        docker compose stop ollama 2>$null | Out-Null
+    # Modo cloud: Ollama no se usa. Si quedó un contenedor de un arranque
+    # previo en modo local (corriendo O detenido), lo ELIMINAMOS — no basta
+    # con `stop`, que deja el contenedor en estado `exited` colgado en Docker
+    # Desktop. Usamos `docker ps -a` para detectarlo aunque ya esté apagado.
+    # El modelo descargado vive en el volumen `ollama_data` y NO se toca:
+    # si vuelves a LLM_PROVIDER=ollama, el contenedor se recrea con el modelo.
+    # Eliminamos por NOMBRE de contenedor (recruitai-ollama, hardcodeado en
+    # docker-compose.yml), no vía `docker compose rm ollama`. Esto último
+    # depende del nombre de proyecto Compose (derivado de la carpeta), que
+    # puede no coincidir si el repo se renombró/copió — y entonces la limpieza
+    # falla en silencio. Filtrar/eliminar por nombre es independiente del proyecto.
+    $ollamaExists = docker ps -a --filter "name=recruitai-ollama" --format "{{.Names}}" 2>$null
+    if ($ollamaExists -eq "recruitai-ollama") {
+        Write-Host "Detectado contenedor Ollama de un arranque previo — eliminándolo (modo cloud no lo usa)..." -ForegroundColor Yellow
+        docker rm -f recruitai-ollama 2>$null | Out-Null
     }
 }
 
