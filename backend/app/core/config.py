@@ -132,7 +132,16 @@ class Settings(BaseSettings):
 
     # Environment
     ENVIRONMENT: str = "development"
-    DEBUG: bool = True
+    # DEBUG=False por defecto: con True, SQLAlchemy loguea cada sentencia con
+    # sus parámetros (PII de candidatos en los INSERT) y el logging baja a nivel
+    # DEBUG (fragmentos de CV). Para desarrollo, poner DEBUG=true explícito en
+    # .env. En producción se fuerza a False (ver check_insecure_defaults).
+    DEBUG: bool = False
+
+    # Servidor MCP (integración con agentes de IA externos). Apagado por
+    # defecto: montarlo auto-descubre y expone TODA la superficie del API sin
+    # autenticación. Actívalo con MCP_ENABLED=true solo en entornos controlados.
+    MCP_ENABLED: bool = False
 
     @model_validator(mode="after")
     def sync_ollama_model(self) -> "Settings":
@@ -237,6 +246,12 @@ class Settings(BaseSettings):
                 f"Insecure default values detected for: {', '.join(offenders)}. "
                 f"Set them in your .env before deploying."
             )
+
+        # En producción nunca dejamos DEBUG activo: evita filtrar SQL con PII y
+        # fragmentos de CV a los logs aunque el .env lo deje encendido.
+        if self.ENVIRONMENT == "production" and self.DEBUG:
+            logger.warning("DEBUG=true ignorado en producción (forzado a False para no filtrar PII a logs).")
+            self.DEBUG = False
         return self
 
     class Config:

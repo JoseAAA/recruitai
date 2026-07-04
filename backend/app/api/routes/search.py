@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1008,6 +1008,30 @@ async def explain_decision_to_candidate(
 
     candidate_name = match.candidate_name or "candidato"
 
+    # ── Caché de la explicación ──────────────────────────────────────────────
+    # Reutiliza el texto ya generado si sigue vigente (generado DESPUÉS del
+    # último scoring). Evita re-llamar al LLM cada vez que el reclutador abre la
+    # explicación del mismo candidato: la explicación deriva por completo de los
+    # campos del match, así que mientras el match no cambie el texto es válido.
+    cached_fresh = (
+        match.explanation_candidate
+        and match.explanation_candidate_at
+        and match.scored_at
+        and match.explanation_candidate_at >= match.scored_at
+    )
+    if cached_fresh:
+        logger.info(
+            f"Explanation cache hit for candidate {candidate_id} / job {job_id} — sin llamada LLM"
+        )
+        return CandidateExplanationResponse(
+            candidate_id=str(candidate_id),
+            job_id=str(job_id),
+            candidate_name=candidate_name,
+            job_title=job.title,
+            explanation_for_candidate=match.explanation_candidate,
+            generated_at=(match.explanation_candidate_at.isoformat()),
+        )
+
     explanation_usage: dict = {}
     explanation_text = await llm.explain_for_candidate(
         candidate_name=candidate_name,
@@ -1019,6 +1043,26 @@ async def explain_decision_to_candidate(
         bonus_skills=match.bonus_skills or [],
         usage_out=explanation_usage,
     )
+
+    # Persistir en el caché. Se preserva ``scored_at`` a su valor actual para que
+    # escribir la explicación NO lo avance (si lo avanzara, el caché parecería
+    # siempre vigente aunque el match cambiara después). ``explanation_candidate_at``
+    # queda en now(): como la explicación se genera tras el scoring, now() es
+    # >= scored_at → vigente hasta el próximo re-scoring.
+    try:
+        await db.execute(
+            update(MatchResultDB)
+            .where(MatchResultDB.id == match.id)
+            .values(
+                explanation_candidate=explanation_text,
+                explanation_candidate_at=func.now(),
+                scored_at=match.scored_at,
+            )
+        )
+        await db.commit()
+    except Exception as e:  # el caché es best-effort, nunca romper la respuesta
+        logger.warning(f"No se pudo cachear la explicación al candidato: {e}")
+        await db.rollback()
 
     # Auditoría: ejercicio del derecho a explicación.
     await audit.log_access(

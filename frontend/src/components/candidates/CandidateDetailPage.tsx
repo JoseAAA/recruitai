@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { candidatesApi, notesApi, CandidateDetail as CandidateDetailType, CandidateNote } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import ExperienceEditor from "./ExperienceEditor";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -41,6 +42,8 @@ function formatDate(d: string | null | undefined): string {
 const CandidateDetailPage: React.FC = () => {
     const params = useParams();
     const router = useRouter();
+    const { user } = useAuth();
+    const isAdmin = user?.role === "admin";
     const candidateId = params.id as string;
 
     const [candidate, setCandidate] = useState<CandidateDetailType | null>(null);
@@ -55,6 +58,7 @@ const CandidateDetailPage: React.FC = () => {
     const [submittingNote, setSubmittingNote] = useState(false);
     const [showDeleteModal, setShowDeleteModal] = useState(false);
     const [deleting, setDeleting] = useState(false);
+    const [deleteError, setDeleteError] = useState<string | null>(null);
     const [loadingFile, setLoadingFile] = useState<"preview" | "download" | null>(null);
 
     // Inline edit for contact data (used when LLM extraction missed something)
@@ -102,9 +106,18 @@ const CandidateDetailPage: React.FC = () => {
     const handleDelete = async () => {
         try {
             setDeleting(true);
+            setDeleteError(null);
             await candidatesApi.delete(candidateId);
             router.push("/candidates");
-        } catch { setDeleting(false); }
+        } catch (e: any) {
+            setDeleting(false);
+            // El modal queda abierto mostrando el motivo — antes fallaba en silencio.
+            if (e?.response?.status === 403) {
+                setDeleteError("Solo un administrador puede eliminar candidatos. Pídele a tu administrador que lo elimine.");
+            } else {
+                setDeleteError(e?.response?.data?.detail || "No se pudo eliminar el candidato. Intenta de nuevo.");
+            }
+        }
     };
 
     const openContactEdit = () => {
@@ -439,12 +452,14 @@ const CandidateDetailPage: React.FC = () => {
                         )}
                     </div>
 
-                    {/* Delete */}
-                    <button onClick={() => setShowDeleteModal(true)}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500 text-sm font-medium hover:border-red-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 transition-colors">
-                        <span className="material-symbols-outlined text-[16px]">delete</span>
-                        Eliminar candidato
-                    </button>
+                    {/* Delete — solo admin (el backend responde 403 a reclutadores) */}
+                    {isAdmin && (
+                        <button onClick={() => setShowDeleteModal(true)}
+                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500 text-sm font-medium hover:border-red-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 transition-colors">
+                            <span className="material-symbols-outlined text-[16px]">delete</span>
+                            Eliminar candidato
+                        </button>
+                    )}
                 </div>
 
                 {/* Right: Experiencia, Formación, Certificaciones, Idiomas */}
@@ -613,8 +628,13 @@ const CandidateDetailPage: React.FC = () => {
                             <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-1">¿Eliminar Candidato?</h3>
                             <p className="text-sm text-slate-500">Se eliminará permanentemente a <strong>{candidate.full_name}</strong>. Esta acción no se puede deshacer.</p>
                         </div>
+                        {deleteError && (
+                            <p className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2 mb-4">
+                                {deleteError}
+                            </p>
+                        )}
                         <div className="flex gap-3">
-                            <button onClick={() => setShowDeleteModal(false)} disabled={deleting}
+                            <button onClick={() => { setShowDeleteModal(false); setDeleteError(null); }} disabled={deleting}
                                 className="flex-1 py-2 px-4 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
                                 Cancelar
                             </button>

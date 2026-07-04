@@ -36,6 +36,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/candidates", tags=["Candidates"])
 
 
+# ============ Safe Content-Type Helper ============
+
+# Tipos MIME seguros derivados de la EXTENSIÓN validada del archivo. Nunca se
+# confía en el Content-Type que declara el cliente al subir: un atacante
+# autenticado puede subir un PDF-políglota (bytes %PDF válidos que pasan la
+# validación estructural) con <script> en texto plano y declararlo como
+# "text/html"; si luego se sirve inline en el preview, el navegador lo
+# renderiza como HTML y ejecuta el script en el origen de la app (XSS
+# almacenado → robo del token de sesión). Servimos siempre con el tipo que
+# corresponde a la extensión real, y con X-Content-Type-Options: nosniff.
+_SAFE_MEDIA_TYPES = {
+    "pdf":  "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "doc":  "application/msword",
+}
+
+
+def _safe_media_type(filename: str) -> str:
+    """Devuelve un Content-Type seguro según la extensión (ignora el del cliente)."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return _SAFE_MEDIA_TYPES.get(ext, "application/octet-stream")
+
+
 # ============ Date Parsing Helpers ============
 
 import dateparser as _dateparser
@@ -462,7 +485,9 @@ async def upload_cv(
                 candidate_id=str(candidate_db.id),
                 file_bytes=content,
                 filename=filename,
-                content_type=file.content_type or "application/octet-stream",
+                # Tipo derivado de la extensión validada, NO el que declaró el
+                # cliente (evita almacenar un content-type malicioso).
+                content_type=_safe_media_type(filename),
             )
             logger.info(f"CV saved to MinIO for candidate {candidate_db.id}")
         except Exception as e:
@@ -914,11 +939,15 @@ async def download_cv(
         details={"filename": filename},
     )
 
+    # Tipo seguro derivado de la extensión (no el guardado, que en subidas
+    # antiguas pudo haber venido del cliente) + nosniff. La descarga ya va como
+    # attachment, así que el navegador no la ejecuta.
     return Response(
         content=file_bytes,
-        media_type=content_type,
+        media_type=_safe_media_type(filename),
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -929,14 +958,25 @@ async def preview_cv(
     current_user: UserResponse = Depends(get_current_active_user),
     storage: StorageService = Depends(get_storage),
 ):
-    """Preview the CV file inline (opens in browser tab for PDFs)."""
+    """Preview the CV file inline (opens in browser tab for PDFs).
+
+    Seguridad: se sirve con un Content-Type derivado de la extensión validada
+    (no el que declaró quien subió el archivo) y con ``nosniff``. Solo los PDF
+    se muestran inline; cualquier otro tipo se fuerza a descarga (attachment)
+    para que el navegador nunca lo renderice como HTML/script.
+    """
     try:
-        file_bytes, content_type, filename = storage.download_cv(str(candidate_id))
+        file_bytes, _stored_type, filename = storage.download_cv(str(candidate_id))
+        media_type = _safe_media_type(filename)
+        # Inline solo si es PDF (los navegadores no previsualizan DOCX de todas
+        # formas); el resto se descarga para no ejecutarlo en el origen.
+        disposition = "inline" if media_type == "application/pdf" else "attachment"
         return Response(
             content=file_bytes,
-            media_type=content_type,
+            media_type=media_type,
             headers={
-                "Content-Disposition": f'inline; filename="{filename}"',
+                "Content-Disposition": f'{disposition}; filename="{filename}"',
+                "X-Content-Type-Options": "nosniff",
             },
         )
     except FileNotFoundError:

@@ -211,6 +211,13 @@ class MatchResultDB(Base):
     missing_skills: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
     bonus_skills: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
     guia_entrevista: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Explicación en lenguaje accesible al candidato (derecho a explicación,
+    # DS 115-2025-PCM). Se cachea aquí para no re-llamar al LLM cada vez que el
+    # reclutador la pide para el mismo par candidato-vacante. Se considera
+    # vigente mientras ``explanation_candidate_at >= scored_at``; un re-scoring
+    # avanza ``scored_at`` y la invalida (se regenera bajo demanda).
+    explanation_candidate: Mapped[Optional[str]] = mapped_column(Text)
+    explanation_candidate_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True))
     scored_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 

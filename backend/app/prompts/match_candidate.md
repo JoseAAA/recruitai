@@ -30,7 +30,7 @@ REGLAS DE PUNTUACIÓN:
 
 4. DISCRIMINA: si dos candidatos difieren en evidencia, sus puntajes deben diferir. No coloques las tres dimensiones en el mismo número por defecto; cada una se justifica por su propia evidencia.
 
-5. relevant_experience_years: suma SOLO años en roles cuya FUNCIÓN coincide con "$job_title" (misma área funcional, no título idéntico). Excluye prácticas, voluntariado y áreas no relacionadas. 0 si no hay experiencia afín.
+5. relevant_experience_years: suma SOLO años en roles cuya FUNCIÓN coincide con la del puesto (el Título aparece más abajo en DATOS_DEL_PUESTO; misma área funcional, no título idéntico). Excluye prácticas, voluntariado y áreas no relacionadas. 0 si no hay experiencia afín.
 
 6. missing_critical_skills: array con las REQUERIDAS en estado AUSENTE (juzga por significado: si tiene un equivalente, NO va aquí). Lista vacía [] si las cubre todas.
 

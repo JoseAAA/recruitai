@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import DocumentExtractor, EmbeddingService, LLMEngine
-from app.api.routes.auth import get_current_active_user, UserResponse
+from app.api.routes.auth import get_current_active_user, get_current_admin_user, UserResponse
 from app.core.database import get_db
 from app.core.privacy import AuditLogger, get_audit_logger
 from app.core.usage import LLMUsageRecorder, get_usage_recorder
@@ -523,11 +523,17 @@ async def update_job(
 async def delete_job(
     job_id: UUID,
     request: Request,
-    current_user: UserResponse = Depends(get_current_active_user),
+    current_user: UserResponse = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
     audit: AuditLogger = Depends(get_audit_logger),
 ):
     """Delete a job profile and cascade-delete all its candidates (DB + Qdrant + MinIO).
+
+    Solo admin: borrar una vacante arrastra en cascada TODOS sus candidatos
+    (destrucción masiva de PII), por lo que exige el mismo privilegio que
+    ``delete_candidate``. Antes bastaba con ser usuario activo — un reclutador
+    no-admin podía eliminar todos los CVs de una vacante sin poder borrar uno
+    individual, una incoherencia de permisos.
 
     LPDP: la eliminación de una vacante arrastra todos los CVs asociados —
     es una cancelación masiva de PII. Queda registrada con el conteo de

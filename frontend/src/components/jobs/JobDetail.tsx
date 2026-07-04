@@ -701,7 +701,7 @@ function PipelineTab({ candidates, scoreMap, isAdmin, deleteError, deletingId, u
 
 // ── More Menu ────────────────────────────────────────────────────────────────
 
-function MoreMenu({ status, onClose, onDelete }: { status: string; onClose: () => void; onDelete: () => void }) {
+function MoreMenu({ status, canDelete, onClose, onDelete }: { status: string; canDelete: boolean; onClose: () => void; onDelete: () => void }) {
     const [open, setOpen] = useState(false);
     const ref = useRef<HTMLDivElement>(null);
 
@@ -728,11 +728,15 @@ function MoreMenu({ status, onClose, onDelete }: { status: string; onClose: () =
                         <span className="material-symbols-outlined text-[18px]">{status === "active" ? "lock" : "lock_open"}</span>
                         {status === "active" ? "Cerrar vacante" : "Reabrir vacante"}
                     </button>
-                    <button onClick={() => { onDelete(); setOpen(false); }}
-                        className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
-                        <span className="material-symbols-outlined text-[18px]">delete</span>
-                        Eliminar vacante
-                    </button>
+                    {/* Eliminar arrastra todos los CVs en cascada — el backend lo
+                        restringe a admin (403), así que no se ofrece a reclutadores. */}
+                    {canDelete && (
+                        <button onClick={() => { onDelete(); setOpen(false); }}
+                            className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
+                            <span className="material-symbols-outlined text-[18px]">delete</span>
+                            Eliminar vacante
+                        </button>
+                    )}
                 </div>
             )}
         </div>
@@ -823,14 +827,23 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
         }
     }
 
+    const [deleteJobError, setDeleteJobError] = useState<string | null>(null);
+
     async function handleDeleteJob() {
         setDeletingJob(true);
+        setDeleteJobError(null);
         try {
             await jobsApi.delete(jobId);
             router.push("/jobs");
-        } catch {
+        } catch (e: any) {
             setDeletingJob(false);
-            setShowDeleteJobConfirm(false);
+            // El modal queda abierto mostrando el motivo — antes se cerraba en
+            // silencio y el usuario no sabía si borró o no.
+            if (e?.response?.status === 403) {
+                setDeleteJobError("Solo un administrador puede eliminar convocatorias. Pídele a tu administrador que la elimine.");
+            } else {
+                setDeleteJobError(e?.response?.data?.detail || "No se pudo eliminar la convocatoria. Intenta de nuevo.");
+            }
         }
     }
 
@@ -910,7 +923,7 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
                             <span className="material-symbols-outlined text-[18px]">upload_file</span>
                             Importar CVs
                         </button>
-                        <MoreMenu status={job.status} onClose={handleCloseJob} onDelete={() => setShowDeleteJobConfirm(true)} />
+                        <MoreMenu status={job.status} canDelete={isAdmin} onClose={handleCloseJob} onDelete={() => setShowDeleteJobConfirm(true)} />
                     </div>
                 </div>
 
@@ -1085,8 +1098,13 @@ const JobDetail: React.FC<Props> = ({ jobId }) => {
                         <p className="text-sm text-slate-600 dark:text-slate-300 mb-5">
                             Se eliminará <strong>"{job.title}"</strong> y todos sus CVs asociados.
                         </p>
+                        {deleteJobError && (
+                            <p className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2 mb-4">
+                                {deleteJobError}
+                            </p>
+                        )}
                         <div className="flex gap-3">
-                            <button onClick={() => setShowDeleteJobConfirm(false)}
+                            <button onClick={() => { setShowDeleteJobConfirm(false); setDeleteJobError(null); }}
                                 className="flex-1 px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">
                                 Cancelar
                             </button>

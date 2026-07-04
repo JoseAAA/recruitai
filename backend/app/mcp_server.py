@@ -32,7 +32,18 @@ def setup_mcp(app: FastAPI) -> None:
     - Auto-generated tool descriptions from FastAPI docstrings
     - Preserves request/response schemas (Pydantic models)
     - Works with Claude Desktop, Cursor, ChatGPT, and any MCP-compatible client
+
+    SEGURIDAD: montar el MCP auto-descubre y expone TODA la superficie del API
+    (incluidos endpoints admin y sus schemas) sin autenticación. Por eso está
+    apagado por defecto y solo se monta si ``MCP_ENABLED=true`` en .env. No lo
+    actives en una instancia accesible desde una red no confiable.
     """
+    from app.core.config import settings
+
+    if not settings.MCP_ENABLED:
+        logger.info("MCP Server deshabilitado (MCP_ENABLED=false). No se monta /mcp.")
+        return
+
     try:
         from fastapi_mcp import FastApiMCP
         
